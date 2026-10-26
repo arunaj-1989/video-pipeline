@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "universal-video-maker"
+version = "0.1.0"
+description = "Topic-agnostic video production control plane with evidence and review workflows."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "alembic>=1.14,<2.0",
+    "boto3>=1.35,<2.0",
+    "fastapi>=0.115,<1.0",
+    "PyJWT[crypto]>=2.10,<3.0",
+    "psycopg[binary]>=3.2,<4.0",
+    "pydantic-settings>=2.6,<3.0",
+    "sqlalchemy>=2.0,<3.0",
+    "structlog>=24.4,<26.0",
+    "uvicorn[standard]>=0.32,<1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "httpx>=0.27,<1.0",
+    "pytest>=8.3,<9.0",
+    "ruff>=0.9,<1.0",
+]
+vector = [
+    "chromadb>=0.5,<2.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/universal_video_maker"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

@@ -1,0 +1,15 @@
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.1
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${UVM_KEYCLOAK_BOOTSTRAP_ADMIN:?Set UVM_KEYCLOAK_BOOTSTRAP_ADMIN in .env}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${UVM_KEYCLOAK_BOOTSTRAP_PASSWORD:?Set UVM_KEYCLOAK_BOOTSTRAP_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - keycloak-data:/opt/keycloak/data
+      - ./identity/keycloak/universal-video-maker-realm.json:/opt/keycloak/data/import/universal-video-maker-realm.json:ro
+
+volumes:
+  keycloak-data:
