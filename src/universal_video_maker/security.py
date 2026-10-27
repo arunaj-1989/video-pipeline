@@ -31,6 +31,7 @@ class Permission(StrEnum):
 class Principal:
     subject: str
     roles: frozenset[Role]
+    email: str | None = None
 
 
 ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {

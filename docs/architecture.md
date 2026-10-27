@@ -648,25 +648,33 @@ fictionalized dialogue from documented quotations.
 Topic queue, research queue, fact verification, episode queue, approval center,
 content lineage, audit logs, and governance reports.
 
-The initial Next.js/Tailwind/Shadcn governance UI uses fixture data to validate
-the editorial workflow and responsive interaction patterns. Topic additions
-and review decisions are local preview state only. Keycloak bearer-token
-verification currently protects only `/api/v1/auth/me`; the UI login flow,
-internal-user mapping, and governance API are not yet connected. The preview
-must not be treated as a production approval system.
+The Next.js/Tailwind/Shadcn governance UI uses Keycloak Authorization Code +
+PKCE sign-in. Its screens read PostgreSQL through role-protected endpoints:
+`/api/v1/topics` (list/create), `/api/v1/governance/summary`,
+`/api/v1/governance/approvals`, and `/api/v1/governance/audit-events` (admin
+only). The summary drives overview metrics, lineage counts, and reports.
+`/api/v1/claims` lists claims with evidence assessments and
+`POST /api/v1/claims/{id}/review` records fact-check decisions for
+`fact_reviewer`/`admin` users; `user_mapping.py` maps the Keycloak subject (a
+UUID) to an internal `users` row on first review. `POST /api/v1/episodes/plan`
+generates a draft episode plan from verified evidence via Ollama and Chroma
+(injectable through `create_app(plan_generator_factory=...)`; 503 when those are
+unavailable, 409 without verified evidence), and `GET /api/v1/episodes/{id}/plan`
+returns the latest revision. Approval-recording actions are not exposed yet,
+so the UI must not be treated as a production approval system.
 
 ### Monitoring dashboard
 
 Agent status, pipeline health, RunPod/pod status, GPU jobs, failures/retries,
 storage usage, video statistics, and rendering progress.
 
-The Monitoring UI preview at `/monitoring` uses explicitly labeled fixtures
-for the workflow range selector, service and agent states, GPU jobs, failures,
-storage, and estimated costs. Job filters and search operate on local fixture
-data only. No telemetry, RunPod, billing, storage, or monitoring API is
-connected, and live refresh is unavailable. This preview is not an operational
-readiness signal; production monitoring still requires the instrumentation,
-metrics export, dashboards, and alerting described in Section 7.
+`/monitoring` requires Keycloak sign-in with `analytics:read` and reads
+`/api/v1/monitoring/overview`, which aggregates `workflow_runs`,
+`workflow_steps`, and `render_jobs` (counts, success rate, recorded cost, recent
+jobs and failures, throughput series). Agent telemetry, storage usage, budgets,
+and live RunPod probes are not connected and are labeled as such. Production
+monitoring still requires the instrumentation, metrics export, dashboards, and
+alerting described in Section 7.
 
 ### Topic Discovery service
 

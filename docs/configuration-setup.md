@@ -5,19 +5,21 @@ deployment locations. It also distinguishes what is available in this
 repository from what still must be implemented before production.
 
 > **Production status:** Universal Video Maker is not production-ready and does
-> not currently generate a video end to end. The web studio is a browser-only
-> preview. Backend modules and provider adapters exist, but they are not wired
-> into the web application as a production workflow. Do not put real users,
-> confidential material, or production decisions through the preview.
+> not currently generate a video end to end. The authenticated topic queue
+> reads/writes local PostgreSQL; overview, approvals history, audit trail,
+> reports, and `/monitoring` read PostgreSQL records (read-only).
+> Backend modules and provider adapters are not yet wired into a complete
+> production workflow. Do not use the preview screens for real approvals or
+> production decisions.
 
 ## 1. Quick answer: what credentials and services are needed?
 
 | Service | Key or account required? | What it is for | Current integration status |
 |---|---|---|---|
-| PostgreSQL | Database credentials/connection string | Durable application records and workflow history | Models and migrations exist; web workflow is not connected |
+| PostgreSQL | Database credentials/connection string | Durable application records and workflow history | Topic queue reads and creates records; broader workflows remain unwired |
 | Tavily | Tavily API key | Search-result discovery for research | Adapter exists; not connected to the UI/API workflow |
 | Ollama | No API key for a local Ollama server by default | Local research, planning, and embeddings | Adapters exist; not connected to the UI/API workflow |
-| Keycloak | Admin bootstrap credentials for local Compose; production identity-provider deployment | User identity and API token validation | Local development setup exists; only `/api/v1/auth/me` is protected; no UI login |
+| Keycloak | Admin bootstrap credentials for local Compose; production identity-provider deployment | User sign-in and API token validation | Local UI sign-in and protected topic endpoints are connected; other domain operations remain unwired |
 | MinIO or S3-compatible storage | Access key and secret key | Durable media/source artifact storage | Storage adapter exists; service/bucket provisioning and workflow integration remain |
 | RunPod | RunPod API key and Serverless endpoint ID | GPU compute dispatch | Budgeted adapter exists; no production video worker or UI/API dispatch flow |
 | LTX-2.5 model access | Acceptance of gated model terms/license; worker-side model access | Selected ComfyUI video model | Custom worker is not implemented; do not assume a RunPod secret alone is sufficient |
@@ -119,6 +121,34 @@ PostgreSQL service, not the local development setup. Keep the password in a
 secret manager. The repository README describes the `PGPASSFILE` option for
 local CLI authentication.
 
+For local development, `compose.postgres.yaml` provides PostgreSQL on loopback
+with a persistent Docker volume. With Docker Desktop running and a loopback
+PostgreSQL URL configured in `.env`, initialize the service and schema from
+the repository root:
+
+```powershell
+.\scripts\start-local-postgres.ps1
+python -m alembic upgrade head
+```
+
+The helper uses the URL's local database name and username without printing
+them, and refuses remote database hosts. This development-only container uses
+trust authentication, but its published port is bound to loopback only. Keep
+the URL in the ignored `.env`; do not commit it. Never expose this database to
+other machines or use it for production.
+
+Create a local custom-format backup and verify it by restoring into a temporary
+database:
+
+```powershell
+.\scripts\backup-local-postgres.ps1
+.\scripts\verify-local-postgres-restore.ps1 -BackupPath .\backups\postgres\<backup-file>.dump
+```
+
+Keep the backup files out of source control and copy important backups off the
+device. Production additionally needs managed, monitored backups, off-site
+retention, and a scheduled restore test.
+
 ### Keycloak credentials and OIDC values
 
 Keycloak does not give you an external API key for this setup. For local
@@ -219,10 +249,11 @@ production Compose configuration, or a production secret manager integration.
    keep it that way.
 3. Start services you need separately. For example, `startup.ps1` starts the
    local API and web preview, but not PostgreSQL, Ollama, MinIO, or Keycloak.
-4. For the local Keycloak Compose service, set
+4. For local sign-in and topic access, set
    `UVM_KEYCLOAK_BOOTSTRAP_ADMIN` and
    `UVM_KEYCLOAK_BOOTSTRAP_PASSWORD` in `.env` before running
-   `docker compose up -d keycloak`.
+   `docker compose up -d keycloak`. Then create a Keycloak user with the
+   `editor` realm role.
 
 Do not use a developer `.env` file as the production secret-management plan.
 
@@ -233,9 +264,11 @@ from the deployment platform's secret manager or protected environment
 configuration. Keep secret values out of source code, build logs, Docker
 images, browser code, screenshots, and documentation.
 
-The web application currently has no configured API URL or login settings
-because it does not call the API. Do not put server credentials in a
-`NEXT_PUBLIC_...` variable; Next.js public variables are exposed to browsers.
+The web app uses Keycloak Authorization Code + PKCE and proxies API calls
+through Next.js. Its public client settings default to the local realm/client;
+`UVM_API_INTERNAL_URL` defaults to `http://127.0.0.1:8000`. Never put server
+credentials in a `NEXT_PUBLIC_...` variable; Next.js public variables are
+exposed to browsers.
 
 The existing `startup.ps1` forcibly selects development mode, binds services to
 loopback, launches Next.js in dev mode, and does not start dependencies or run
@@ -292,13 +325,12 @@ capacity, privacy, and performance still need to be reviewed for the deployment.
 
 The local realm/client/role import is
 `identity/keycloak/universal-video-maker-realm.json`; the local-only service
-definition is `compose.yaml`. Configure production realms and clients in the
-production identity deployment rather than exposing the development Compose
-service. Rotate bootstrap credentials and use HTTPS.
-
-Current limitation: the API verifies identity only at `/api/v1/auth/me`. The
-web UI has no Keycloak login flow, and identity subjects are not linked to
-internal user records or protected domain operations.
+definition is `compose.yaml`. The browser uses Authorization Code + PKCE, and
+the API protects topic reads/writes with bearer-token validation and topic
+permissions. Other domain operations are not yet exposed as API routes.
+Configure production realms and clients in the production identity deployment
+rather than exposing the development Compose service. Rotate bootstrap
+credentials and use HTTPS.
 
 ### MinIO / S3-compatible object storage
 
@@ -387,8 +419,9 @@ items are complete and verified:
 
 - Persistent PostgreSQL, migration/rollback process, backups, and restore test.
 - Production Keycloak deployment and secure realm/client configuration.
-- UI login and server-side authorization on every protected domain operation;
-  internal-user mapping, account recovery, role lifecycle, and audit review.
+- Server-side authorization on every protected domain operation, internal-user
+  mapping, account recovery, role lifecycle, and audit review. The current UI
+  login and authorization cover topic read/create only.
 - API and UI deployment behind HTTPS with production-safe startup and
   configuration validation.
 - Durable source snapshots and output storage with retention, access controls,

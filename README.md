@@ -52,28 +52,36 @@ Install the application, tests, and local ChromaDB provider:
 python -m pip install -e ".[dev,vector]"
 ```
 
-Set `UVM_DATABASE_URL` to a PostgreSQL connection URL and apply migrations:
+For local development, start the persistent PostgreSQL container and apply
+migrations:
 
 ```powershell
-$env:UVM_DATABASE_URL = "postgresql+psycopg://uvm_user@localhost:5432/universal_video_maker"
+.\scripts\start-local-postgres.ps1
 python -m alembic upgrade head
 ```
 
-For password authentication, keep credentials out of the URL and configure a
-PostgreSQL password file (`%APPDATA%\postgresql\pgpass.conf` or `PGPASSFILE`).
-Do not commit credentials. `UVM_CHROMA_PERSIST_DIRECTORY` controls the local
-ChromaDB data directory; `UVM_CHROMA_COLLECTION` controls its collection.
+The Compose service binds only to localhost and stores database files in the
+persistent `postgres-data` volume. The local-only container uses trust
+authentication and must never be exposed to other machines or used in
+production. The helper reads the existing PostgreSQL URL without printing it
+and refuses non-loopback hosts. For managed production PostgreSQL, store its
+URL in the deployment secret manager. `UVM_CHROMA_PERSIST_DIRECTORY` controls
+the local ChromaDB data directory; `UVM_CHROMA_COLLECTION` controls the
+collection.
 
-Back up PostgreSQL with the provided script after configuring `PGPASSFILE`:
+Create and verify a local backup:
 
 ```powershell
-.\scripts\backup-postgres.ps1
+.\scripts\backup-local-postgres.ps1
+.\scripts\verify-local-postgres-restore.ps1 -BackupPath .\backups\postgres\<backup-file>.dump
 ```
 
-The script writes a timestamped custom-format dump. Copy backups off-device and
-periodically test restores. ChromaDB can be rebuilt from durable source and
-claim records; generated media and source snapshots require their own
-object-storage backup policy.
+The backup script writes a timestamped custom-format dump; restore verification
+restores it into a temporary database and removes that database afterward. Keep
+local backups out of source control, copy production backups off-device, and
+schedule/monitor provider-managed backups for production. ChromaDB can be
+rebuilt from durable source and claim records; generated media and source
+snapshots require their own object-storage backup policy.
 
 The database tests use SQLite and a fake vector collection, so they do not
 require a running PostgreSQL server or ChromaDB service.
@@ -215,13 +223,15 @@ before provisioning a worker.
 ## Local identity and object storage
 
 Keycloak is the selected self-hosted OIDC provider. For local development,
-copy `.env.example` to `.env`, set `UVM_KEYCLOAK_BOOTSTRAP_ADMIN` and
-`UVM_KEYCLOAK_BOOTSTRAP_PASSWORD`, then run `docker compose up -d keycloak`.
-The realm import configures the web/API clients and the application roles.
-Create users and assign realm roles in the local Keycloak console. The API
-validates RS256 bearer tokens at `/api/v1/auth/me`; the governance UI and
-domain-operation routes are not yet connected to login, and Keycloak subjects
-are not yet mapped to internal database users.
+set `UVM_KEYCLOAK_BOOTSTRAP_ADMIN` and
+`UVM_KEYCLOAK_BOOTSTRAP_PASSWORD` in the ignored `.env`, then run
+`docker compose up -d keycloak`. The imported realm configures the public web
+client for Authorization Code + PKCE and the API audience. Create a user and
+assign the `editor` realm role in the local Keycloak console. The governance
+UI signs in with Keycloak, and its topic queue reads and creates PostgreSQL
+records through authenticated `/api/v1/topics` endpoints. Other governance
+sections remain previews; broader workflow authorization and internal-user
+mapping are not implemented.
 
 `MinioObjectStore` supports checksum-tracked `s3://` uploads and downloads;
 `MinioArtifactInspector` downloads an object temporarily and validates media
@@ -267,22 +277,41 @@ title/thumbnail experiments need a larger measured dataset and evaluation.
 ## Governance UI
 
 The Next.js app in `apps/governance-web` provides a responsive editorial
-workspace for topic triage, research status, claim evidence review, approvals,
-content lineage, audit history, and governance metrics. It currently uses
-illustrative fixture data. Review decisions and new topics are held only in
-the current browser session. Keycloak token verification protects only the
-`/api/v1/auth/me` identity endpoint; the UI login flow, internal-user mapping,
-and authenticated governance operations remain unimplemented.
+workspace. Every screen requires Keycloak sign-in and reads PostgreSQL through
+role-protected endpoints: the topic queue (`/api/v1/topics`), overview metrics,
+lineage counts and reports (`/api/v1/governance/summary`), approval history
+(`/api/v1/governance/approvals`), and the audit trail
+(`/api/v1/governance/audit-events`, admin only). Editors and admins can approve or
+reject a proposed topic with a required note (`POST /api/v1/topics/{id}/decision`,
+moving it to `ready_to_plan` or `rejected` and writing an audit event).
+Fact verification lists claims
+with their evidence and independence assessment (`/api/v1/claims`); users with
+the `fact_reviewer` or `admin` role record decisions through
+`POST /api/v1/claims/{id}/review`, which enforces the two-independent-source rule
+and writes an audit event. The first review creates the reviewer's internal
+`users` row from the Keycloak subject. Editors and admins can click **Run research**
+on an approved topic (`POST /api/v1/research`): Tavily finds sources, snapshots are
+saved under `source_snapshot_directory`, and Ollama proposes claims that are stored as
+`unverified` for Fact verification. This needs `UVM_TAVILY_API_KEY` in `.env` and a
+running Ollama (503 with a clear message otherwise). `GET /api/v1/episodes` lists episodes.
+Editors and admins can click **Plan episode** on an approved (ready to plan) topic;
+this calls `POST /api/v1/episodes/plan`, which retrieves verified evidence, asks the
+local Ollama model for a 3-minute outline and three Shorts concepts with cited
+narration, and saves it as a draft revision (`GET /api/v1/episodes/{id}/plan` to
+view). It needs Ollama running with the chat and embedding models, and the
+`vector` extra (`pip install -e ".[vector]"`); otherwise the API returns 503. It
+returns 409 if the topic has no verified evidence. Recording approvals is not
+exposed by the API yet, so those screens show empty states until records exist.
 
 ## Monitoring UI
 
-The studio also includes a responsive monitoring preview at
-`/monitoring` for workflow throughput, pipeline health, agent activity, GPU
-jobs, failures/retries, storage, rendering progress, and illustrative spend.
-The values are fixture data; filters and time ranges only change local sample
-views. No telemetry, RunPod, billing, or monitoring API is connected, and live
-refresh is unavailable. Do not use the preview to assess operational
-readiness.
+`/monitoring` requires Keycloak sign-in with a role that has `analytics:read`
+(`viewer`, `publisher`, or `admin`). It reads `/api/v1/monitoring/overview`,
+which aggregates `workflow_runs`, `workflow_steps`, and `render_jobs` for the
+selected window (workflow counts and success rate, render jobs and recorded
+cost, recent failures). Agent telemetry, storage usage, budgets, and live
+RunPod probes are not connected and are shown as such. Empty tables show zeros
+and empty states, not sample data.
 
 ```powershell
 Set-Location apps\governance-web
@@ -299,8 +328,16 @@ UI.
 From the project root, start the API and web studio with:
 
 ```powershell
+# First set UVM_KEYCLOAK_BOOTSTRAP_ADMIN and UVM_KEYCLOAK_BOOTSTRAP_PASSWORD
+# in .env, then start Keycloak separately:
+docker compose up -d keycloak
+
 .\startup.ps1
 ```
+
+Create a Keycloak user and assign the `editor` realm role before signing in to
+create topics. The topic queue loads/saves PostgreSQL records; the other
+workspace screens are still previews.
 
 The script uses `.venv` when available, checks that Python/Node dependencies
 are installed, creates `.env` from `.env.example` only if it is missing, and

@@ -92,7 +92,12 @@ class KeycloakTokenVerifier:
         if not isinstance(subject, str) or not subject.strip():
             raise AccessTokenError("Bearer token has no valid subject.")
         roles = _roles_from_claims(claims)
-        return Principal(subject=subject, roles=roles)
+        email = claims.get("email")
+        return Principal(
+            subject=subject,
+            roles=roles,
+            email=email.strip() if isinstance(email, str) and email.strip() else None,
+        )
 
 
 def _roles_from_claims(claims: dict[str, object]) -> frozenset[Role]:

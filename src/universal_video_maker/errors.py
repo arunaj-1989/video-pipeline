@@ -19,3 +19,8 @@ class NotFoundError(ApplicationError):
 class ConflictError(ApplicationError):
     def __init__(self, message: str = "The requested change conflicts with existing data.") -> None:
         super().__init__(code="conflict", message=message, status_code=409)
+
+
+class ServiceUnavailableError(ApplicationError):
+    def __init__(self, message: str = "A required service is unavailable.") -> None:
+        super().__init__(code="service_unavailable", message=message, status_code=503)

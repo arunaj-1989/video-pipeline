@@ -6,12 +6,12 @@ records, expected files, and where each item belongs. It is written for
 editors, fact reviewers, publishers, and operators.
 
 > **Read this before using the product:** The current repository is not yet a
-> production video-generation application. The web pages are previews and do
-> not run the workflow described below. The production procedure in this guide
-> documents the approved system design and implemented backend building
-> blocks; it is not a claim that the workflow is live. Each stage below states
-> its current implementation status. Do not use the preview to make real
-> approvals or expect it to create or save a video.
+> production video-generation application. The authenticated topic queue can
+> persist topic records, but the other web pages remain previews and do not run
+> the end-to-end workflow described below. This guide documents the approved
+> system design and implemented backend building blocks; it is not a claim that
+> the workflow is live. Do not use preview screens to make real approvals or
+> expect them to create or save a video.
 
 ## 1. What the production product is designed to do
 
@@ -361,7 +361,8 @@ Publisher enters cumulative platform counters and the capture time/source.
 
 **Current status:** The service does not fetch data from YouTube or other
 platform APIs. There is no connected analytics UI; the monitoring dashboard
-uses sample telemetry and must not be read as live system health.
+shows only workflow and render records stored in PostgreSQL and is not a full
+system health check.
 
 ## 6. What happens when a step fails?
 
@@ -423,7 +424,7 @@ responds; it does not mean the production dependencies or workflow are live.
 | Tavily excerpt snapshots | Configured snapshot storage and/or durable object storage | Adapter can write local content-hashed excerpts when called; no UI invocation |
 | Rendered video, Shorts, captions, thumbnail | Private MinIO/S3-compatible bucket | Adapter exists; worker transfer and user access are not connected |
 | Model weights/cache | Protected worker cache/volume under accepted model terms | No worker/cache is supplied by the current project |
-| Runtime logs/metrics | Production observability platform | Startup logs are local files; monitoring screen is sample data |
+| Runtime logs/metrics | Production observability platform | Startup logs are local files; monitoring screen shows DB-recorded workflow/render data only |
 
 The production owner must set retention, privacy, access, deletion, and backup
 policies before processing real content.

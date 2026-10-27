@@ -23,6 +23,7 @@ from universal_video_maker.research import (
     EvidenceDraft,
     ResearchDraft,
     ResearchService,
+    _canonicalize_url,
 )
 
 
@@ -96,21 +97,41 @@ class OllamaResearchAssistant:
         )
         try:
             payload = _ResearchPayload.model_validate(response)
-            claims = tuple(
-                CandidateClaim(
-                    claim_text=claim.claim_text,
-                    category=claim.category,
-                    evidence=tuple(
+            source_text = {source.canonical_url: source.text for source in sources}
+            claims: list[CandidateClaim] = []
+            dropped = 0
+            for claim in payload.claims:
+                evidence: list[EvidenceDraft] = []
+                seen_urls: set[str] = set()
+                for item in claim.evidence:
+                    url = _canonicalize_url(item.source_url)
+                    text = source_text.get(url)
+                    # Models often paraphrase; only verbatim excerpts may become evidence.
+                    if text is None or item.excerpt not in text or url in seen_urls:
+                        dropped += 1
+                        continue
+                    seen_urls.add(url)
+                    evidence.append(
                         EvidenceDraft(
-                            source_url=item.source_url,
+                            source_url=url,
                             excerpt=item.excerpt,
                             support_type=item.support_type,
                         )
-                        for item in claim.evidence
-                    ),
+                    )
+                if evidence:
+                    claims.append(
+                        CandidateClaim(
+                            claim_text=claim.claim_text,
+                            category=claim.category,
+                            evidence=tuple(evidence),
+                        )
+                    )
+            open_questions = [question for question in payload.open_questions if question.strip()]
+            if dropped and not claims:
+                open_questions.append(
+                    "The model's quoted evidence did not match the captured sources, so no "
+                    "claims were recorded. Re-run research or add sources manually."
                 )
-                for claim in payload.claims
-            )
             return ResearchDraft(
                 topic_id=topic.id,
                 sources=sources,
@@ -118,9 +139,10 @@ class OllamaResearchAssistant:
                     "provider": "ollama",
                     "review_status": "unverified",
                     "source_type": "captured_excerpt",
+                    "discarded_unverifiable_evidence": dropped,
                 },
-                open_questions=tuple(payload.open_questions),
-                claims=claims,
+                open_questions=tuple(open_questions),
+                claims=tuple(claims),
             )
         except (ValidationError, ValueError) as error:
             raise OllamaClientError(

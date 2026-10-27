@@ -226,7 +226,7 @@ def test_tavily_ollama_workflow_persists_only_unverified_candidate_claims(
         assert session.scalar(select(ResearchRecord).where(ResearchRecord.id == record.id))
 
 
-def test_research_assistant_rejects_quotes_not_present_in_captured_source() -> None:
+def test_research_assistant_discards_quotes_not_present_in_captured_source() -> None:
     assistant = OllamaResearchAssistant(
         FakeChatClient(
             {
@@ -257,5 +257,8 @@ def test_research_assistant_rejects_quotes_not_present_in_captured_source() -> N
         storage_uri="file:///tmp/example.txt",
     )
 
-    with pytest.raises(OllamaClientError, match="captured source evidence"):
-        assistant.draft(topic=topic, sources=(captured,))
+    draft = assistant.draft(topic=topic, sources=(captured,))
+
+    assert draft.claims == ()
+    assert draft.findings["discarded_unverifiable_evidence"] == 1
+    assert any("did not match" in question for question in draft.open_questions)

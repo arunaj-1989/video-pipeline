@@ -9,7 +9,6 @@ import {
   BadgeCheck,
   Bell,
   BookOpenCheck,
-  CalendarDays,
   ChartNoAxesCombined,
   Check,
   CheckCheck,
@@ -32,17 +31,54 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import { useMemo, useState, type FormEvent } from "react";
+import Keycloak from "keycloak-js";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 
+import { KeycloakGate } from "@/components/keycloak-gate";
+import { ClaimsWorkspace, EpisodesWorkspace } from "@/components/claims-workspace";
 import { Button } from "@/components/ui/button";
 import {
-  initialTopics,
   navigationGroups,
   sectionDetails,
-  type ClaimStatus,
+  topicFromRecord,
   type Topic,
   type WorkspaceSection,
 } from "@/lib/governance-data";
+import { createTopic as createTopicRequest, decideTopic, listTopics } from "@/lib/topic-api";
+import {
+  generateEpisodePlan,
+  getGovernanceSummary,
+  runResearch,
+  listApprovals,
+  listAuditEvents,
+  type ApprovalRecord,
+  type AuditEventRecord,
+  type GovernanceSummary,
+} from "@/lib/operations-api";
+
+type OperationsData = {
+  loading: boolean;
+  summary: GovernanceSummary | null;
+  summaryError: string;
+  approvals: ApprovalRecord[];
+  approvalsError: string;
+  audit: AuditEventRecord[];
+  auditError: string;
+};
+
+const emptyOperations: OperationsData = {
+  loading: true,
+  summary: null,
+  summaryError: "",
+  approvals: [],
+  approvalsError: "",
+  audit: [],
+  auditError: "",
+};
+
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback;
+}
 
 const iconMap: Record<string, LucideIcon> = {
   "layout-dashboard": LayoutDashboard,
@@ -56,11 +92,11 @@ const iconMap: Record<string, LucideIcon> = {
   "chart-no-axes-combined": ChartNoAxesCombined,
 };
 
-type TopicFilter = "All topics" | "Needs attention" | "Has 2+ sources";
+type TopicFilter = "All topics" | "Not approved" | "Has 2+ sources";
 
 const topicFilters: TopicFilter[] = [
   "All topics",
-  "Needs attention",
+  "Not approved",
   "Has 2+ sources",
 ];
 
@@ -95,13 +131,13 @@ function PreviewBanner() {
         <Sparkles size={15} />
       </span>
       <p>
-        <strong>Preview workspace</strong>
+        <strong>Governance connected</strong>
         <span>
-          Sample content only. Topics and decisions stay in this browser session;
-          research, production, and governance APIs are not connected.
+          Topics, topic decisions, research, claim review, episode planning, the episode queue,
+          approvals (recording and history), the audit trail, and reports use PostgreSQL.
         </span>
       </p>
-      <span className="preview-label">DEMO MODE</span>
+      <span className="preview-label">LIVE</span>
     </div>
   );
 }
@@ -109,9 +145,13 @@ function PreviewBanner() {
 function Sidebar({
   activeSection,
   onNavigate,
+  topicCount,
+  canWriteTopics,
 }: {
   activeSection: WorkspaceSection;
   onNavigate: (section: WorkspaceSection) => void;
+  topicCount: number;
+  canWriteTopics: boolean;
 }) {
   return (
     <aside className="sidebar">
@@ -155,9 +195,9 @@ function Sidebar({
                 >
                   <Icon size={17} strokeWidth={1.8} aria-hidden="true" />
                   <span>{item.label}</span>
-                  {item.count !== undefined && (
+                  {(item.id === "topics" || item.count !== undefined) && (
                     <span className={`nav-count${active ? " is-active" : ""}`}>
-                      {item.count}
+                      {item.id === "topics" ? topicCount : item.count}
                     </span>
                   )}
                 </button>
@@ -173,21 +213,6 @@ function Sidebar({
           <span>Platform monitoring</span>
           <ArrowUpRight size={13} />
         </Link>
-        <div className="weekly-card">
-          <div className="weekly-card-top">
-            <span className="weekly-icon">
-              <CalendarDays size={15} />
-            </span>
-            <span>THIS WEEK</span>
-            <span className="weekly-dot" />
-          </div>
-          <strong>One story in review</strong>
-          <span>Next publish · Tuesday, 27 Oct</span>
-          <div className="weekly-track">
-            <span />
-          </div>
-          <small>1 of 2 episodes ready</small>
-        </div>
         <button className="help-link" type="button" onClick={() => onNavigate("reports")}>
           <ChartNoAxesCombined size={16} />
           <span>View governance reports</span>
@@ -196,8 +221,8 @@ function Sidebar({
         <div className="profile-row">
           <span className="profile-avatar">ED</span>
           <span className="profile-copy">
-            <strong>Editorial team</strong>
-            <span>Editor access</span>
+            <strong>Signed-in user</strong>
+            <span>{canWriteTopics ? "Editor access" : "Read-only access"}</span>
           </span>
           <span className="icon-button profile-menu" aria-hidden="true">
             <Menu size={17} />
@@ -211,9 +236,11 @@ function Sidebar({
 function TopBar({
   search,
   onSearch,
+  onLogout,
 }: {
   search: string;
   onSearch: (value: string) => void;
+  onLogout: () => void;
 }) {
   return (
     <header className="topbar">
@@ -240,6 +267,9 @@ function TopBar({
         <span className="topbar-avatar" aria-label="Editorial team">
           ED
         </span>
+        <Button onClick={onLogout} type="button" variant="outline">
+          Sign out
+        </Button>
       </div>
     </header>
   );
@@ -318,24 +348,28 @@ function TopicRow({
 function ReviewPanel({
   topic,
   onDecision,
+  onPlan,
+  onResearch,
   notice,
-  independenceConfirmed,
-  onIndependenceChange,
+  canDecide,
+  busy,
 }: {
   topic: Topic;
-  onDecision: (status: ClaimStatus) => void;
+  onDecision: (decision: "approve" | "reject", note: string) => void;
+  onPlan: () => void;
+  onResearch: () => void;
   notice: string;
-  independenceConfirmed: boolean;
-  onIndependenceChange: (confirmed: boolean) => void;
+  canDecide: boolean;
+  busy: boolean;
 }) {
-  const isReviewed = topic.claimStatus === "Verified";
-
+  const [note, setNote] = useState("");
+  const pending = topic.status === "In review";
   return (
     <aside className="review-panel">
       <div className="review-panel-heading">
         <div>
-          <span className="panel-eyebrow">CLAIM REVIEW</span>
-          <h2>Evidence at a glance</h2>
+          <span className="panel-eyebrow">PERSISTED TOPIC</span>
+          <h2>Topic details</h2>
         </div>
         <span className="icon-button subtle-icon-button" aria-hidden="true">
           <Menu size={17} />
@@ -347,18 +381,23 @@ function ReviewPanel({
           <FileCheck2 size={17} />
         </span>
         <span>
-          <strong>{topic.subtitle}</strong>
+          <strong>{topic.title}</strong>
           <small>{topic.category}</small>
         </span>
       </div>
 
       <div className="claim-block">
         <div className="claim-label">
-          <span>FACTUAL CLAIM</span>
-          <span className={`status-pill ${statusTone(topic.claimStatus)}`}>{topic.claimStatus}</span>
+          <span>TOPIC STATUS</span>
+          <span className={`status-pill ${statusTone(topic.status)}`}>{topic.status}</span>
         </div>
-        <blockquote>“{topic.claim}”</blockquote>
-        <p>{topic.claimContext}</p>
+        <p>
+          {pending
+            ? "This topic is waiting for an editorial decision."
+            : topic.status === "Rejected"
+              ? "This topic was rejected."
+              : "This topic has been through editorial review."}
+        </p>
       </div>
 
       <div className="source-heading">
@@ -389,49 +428,75 @@ function ReviewPanel({
       ) : (
         <div className="empty-evidence">
           <FileSearch size={17} />
-          <span>Research sources will appear here when added.</span>
+          <span>
+            {topic.sources === 0
+              ? "No research sources are linked to this topic yet."
+              : `${topic.sources} sources are linked; source details are not loaded in this view.`}
+          </span>
         </div>
       )}
 
-      <label className="independence-check">
-        <input
-          checked={independenceConfirmed}
-          disabled={topic.evidence.length < 2}
-          onChange={(event) => onIndependenceChange(event.target.checked)}
-          type="checkbox"
-        />
-        <span>I checked these sources are independent.</span>
-      </label>
-
-      <div className="independence-note">
-        <ShieldCheck size={15} />
-        <span>
-          Source independence must be confirmed by a reviewer. A source count
-          alone does not establish independent evidence.
-        </span>
-      </div>
-
-      <div className="review-actions">
-        <Button
-          className="approve-button"
-          disabled={isReviewed || topic.evidence.length < 2 || !independenceConfirmed}
-          onClick={() => onDecision("Verified")}
-          type="button"
-        >
-          <Check size={16} />
-          {isReviewed ? "Claim verified" : "Approve claim"}
-        </Button>
-        <Button
-          className="follow-up-button"
-          disabled={topic.claimStatus === "Follow-up"}
-          onClick={() => onDecision("Follow-up")}
-          type="button"
-          variant="outline"
-        >
-          <FileSearch size={15} />
-          Request follow-up
-        </Button>
-      </div>
+      {pending && canDecide && (
+        <>
+          <label className="independence-check">
+            <span>Decision note (required)</span>
+          </label>
+          <textarea
+            aria-label="Decision note"
+            className="decision-note"
+            maxLength={2000}
+            onChange={(event) => setNote(event.target.value)}
+            placeholder="Why are you approving or rejecting this topic?"
+            rows={3}
+            value={note}
+          />
+          <div className="review-actions">
+            <Button
+              className="approve-button"
+              disabled={busy || !note.trim()}
+              onClick={() => onDecision("approve", note.trim())}
+              type="button"
+            >
+              <Check size={16} />
+              Approve topic
+            </Button>
+            <Button
+              className="follow-up-button"
+              disabled={busy || !note.trim()}
+              onClick={() => onDecision("reject", note.trim())}
+              type="button"
+              variant="outline"
+            >
+              <X size={15} />
+              Reject topic
+            </Button>
+          </div>
+        </>
+      )}
+      {pending && !canDecide && (
+        <div className="independence-note">
+          <ShieldCheck size={15} />
+          <span>Only editors and admins can approve or reject topics.</span>
+        </div>
+      )}
+      {topic.status === "Ready to plan" && canDecide && (
+        <div className="review-actions">
+          <Button
+            className="follow-up-button"
+            disabled={busy}
+            onClick={onResearch}
+            type="button"
+            variant="outline"
+          >
+            <FileSearch size={15} />
+            {busy ? "Working..." : "Run research"}
+          </Button>
+          <Button className="approve-button" disabled={busy} onClick={onPlan} type="button">
+            <Sparkles size={16} />
+            {busy ? "Planning with local AI..." : "Plan episode"}
+          </Button>
+        </div>
+      )}
       {notice && (
         <p className="review-notice" role="status">
           <CheckCheck size={15} />
@@ -445,9 +510,11 @@ function ReviewPanel({
 function NewTopicDialog({
   onClose,
   onCreate,
+  saving,
 }: {
   onClose: () => void;
   onCreate: (title: string, category: string) => void;
+  saving: boolean;
 }) {
   const [title, setTitle] = useState("");
   const [category, setCategory] = useState("");
@@ -503,16 +570,16 @@ function NewTopicDialog({
           </label>
           <div className="dialog-demo-note">
             <Sparkles size={15} />
-            Any topic is accepted. This preview only adds it to this browser
-            session; research and video generation are not connected.
+            This topic will be saved to the shared PostgreSQL database. Research
+            and video generation are not connected yet.
           </div>
           <div className="dialog-actions">
             <Button onClick={onClose} type="button" variant="outline">
               Cancel
             </Button>
-            <Button className="approve-button" type="submit">
+            <Button className="approve-button" disabled={saving} type="submit">
               <CirclePlus size={16} />
-              Add video idea
+              {saving ? "Saving..." : "Add video idea"}
             </Button>
           </div>
         </form>
@@ -521,105 +588,95 @@ function NewTopicDialog({
   );
 }
 
+function formatTimestamp(value: string) {
+  return new Date(value).toLocaleString(undefined, {
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function percentage(part: number, whole: number) {
+  return whole === 0 ? 0 : Math.round((part / whole) * 100);
+}
+
+function EmptyWorkspace({ title, detail }: { title: string; detail: string }) {
+  return (
+    <div className="empty-queue">
+      <FileSearch size={21} />
+      <strong>{title}</strong>
+      <span>{detail}</span>
+    </div>
+  );
+}
+
 function SecondaryWorkspace({
   section,
-  topics,
-  onOpenFactReview,
-  approvalDecisions,
-  approvalNotice,
-  onApprovalDecision,
+  ops,
 }: {
   section: WorkspaceSection;
-  topics: Topic[];
-  onOpenFactReview: () => void;
-  approvalDecisions: Record<string, "Approved" | "Changes requested">;
-  approvalNotice: string;
-  onApprovalDecision: (
-    title: string,
-    decision: "Approved" | "Changes requested",
-  ) => void;
+  ops: OperationsData;
 }) {
-  if (section === "approvals") {
-    const approvalItems = [
-      { title: "Aditya-L1 · Story outline", stage: "Outline approval", age: "Due today" },
-      { title: "Chandrayaan-3 · Evidence set", stage: "Fact review", age: "Due today" },
-      { title: "Compound interest · Video brief", stage: "Outline approval", age: "Due tomorrow" },
-    ];
+  const { summary, approvals, audit, loading } = ops;
 
+  if (loading) {
+    return (
+      <section className="secondary-card" role="status">
+        Loading records from PostgreSQL...
+      </section>
+    );
+  }
+
+  if (section === "approvals") {
     return (
       <section className="secondary-card approval-worklist">
         <div className="secondary-heading">
           <div>
             <span className="panel-eyebrow">REVIEW GATES</span>
-            <h2>Waiting for a decision</h2>
+            <h2>Recorded approval decisions</h2>
           </div>
-          <span className="quiet-count">3 items</span>
+          <span className="quiet-count">{approvals.length} records</span>
         </div>
-        {approvalItems.map((item, index) => {
-          const decision = approvalDecisions[item.title];
-          return (
-            <div className="approval-row" key={item.title}>
-              <span className={`approval-index approval-index-${index + 1}`}>0{index + 1}</span>
+        {ops.approvalsError ? (
+          <EmptyWorkspace title="Approvals unavailable" detail={ops.approvalsError} />
+        ) : approvals.length === 0 ? (
+          <EmptyWorkspace
+            title="No approval decisions yet"
+            detail="Decisions will appear here once an episode revision is reviewed."
+          />
+        ) : (
+          approvals.map((item, index) => (
+            <div className="approval-row" key={item.id}>
+              <span className={`approval-index approval-index-${(index % 3) + 1}`}>
+                {String(index + 1).padStart(2, "0")}
+              </span>
               <span className="approval-copy">
-                <strong>{item.title}</strong>
-                <span>{item.stage}</span>
+                <strong>
+                  {item.episode_title} · revision {item.revision}
+                </strong>
+                <span>
+                  {item.stage}
+                  {item.note ? ` · ${item.note}` : ""}
+                </span>
               </span>
               <span className="approval-due">
                 <Clock3 size={14} />
-                {item.age}
+                {formatTimestamp(item.created_at)}
               </span>
-              {decision ? (
-                <span
-                  className={`status-pill ${
-                    decision === "Approved" ? "status-positive" : "status-warm"
-                  }`}
-                >
-                  {decision}
-                </span>
-              ) : (
-                <span className="approval-actions">
-                  {item.stage === "Fact review" ? (
-                    <button
-                      className="approval-action approval-approve"
-                      onClick={onOpenFactReview}
-                      type="button"
-                    >
-                      Review evidence
-                    </button>
-                  ) : (
-                    <>
-                      <button
-                        className="approval-action approval-request"
-                        onClick={() => onApprovalDecision(item.title, "Changes requested")}
-                        type="button"
-                      >
-                        Request changes
-                      </button>
-                      <button
-                        className="approval-action approval-approve"
-                        onClick={() => {
-                          onApprovalDecision(item.title, "Approved");
-                        }}
-                        type="button"
-                      >
-                        Approve
-                      </button>
-                    </>
-                  )}
-                </span>
-              )}
+              <span
+                className={`status-pill ${
+                  item.decision === "approved" ? "status-positive" : "status-warm"
+                }`}
+              >
+                {item.decision}
+              </span>
             </div>
-          );
-        })}
-        {approvalNotice && (
-          <p className="review-notice approval-notice" role="status">
-            <CheckCheck size={15} />
-            {approvalNotice} No API request was made.
-          </p>
+          ))
         )}
         <p className="workspace-disclaimer">
-          Approval controls are preview-only. The API and authenticated reviewer
-          identity are not connected yet.
+          Read-only history from the approvals table. Decisions are recorded from the episode
+          queue by opening an episode plan.
         </p>
       </section>
     );
@@ -637,10 +694,10 @@ function SecondaryWorkspace({
         </div>
         <div className="lineage-flow">
           {[
-            { icon: Globe2, title: "Research sources", detail: `${topics[0]?.sources ?? 0} linked references` },
-            { icon: BadgeCheck, title: "Reviewed claims", detail: "Claim status tracked per revision" },
-            { icon: Clapperboard, title: "Episode package", detail: "Script and storyboard lineage" },
-            { icon: FileCheck2, title: "Release assets", detail: "Final media and source manifest" },
+            { icon: Globe2, title: "Research sources", detail: `${summary?.sources_linked ?? 0} linked references` },
+            { icon: BadgeCheck, title: "Reviewed claims", detail: `${summary?.claims_reviewed ?? 0} of ${summary?.claims_total ?? 0} claims reviewed` },
+            { icon: Clapperboard, title: "Episode package", detail: `${summary?.episodes_total ?? 0} episodes, ${summary?.episodes_with_approval ?? 0} with an approval` },
+            { icon: FileCheck2, title: "Approval records", detail: `${summary?.approvals_total ?? 0} recorded decisions` },
           ].map((step, index) => {
             const Icon = step.icon;
             return (
@@ -658,8 +715,8 @@ function SecondaryWorkspace({
           })}
         </div>
         <p className="workspace-disclaimer">
-          This is a UI preview of the approved lineage model. Live source and
-          revision links will be supplied by the API.
+          Counts come from persisted records. Per-item lineage tracing is not
+          exposed by the API yet.
         </p>
       </section>
     );
@@ -676,24 +733,31 @@ function SecondaryWorkspace({
           <ScrollText size={18} className="lineage-heading-icon" />
         </div>
         <div className="audit-list">
-          {[
-            ["09:42", "Evidence attached", "Ananya linked 2 source references to Aditya-L1."],
-            ["09:18", "Research updated", "Rohan added notes to the sourdough topic."],
-            ["Yesterday", "Video brief updated", "Meera refined a personal-finance outline."],
-          ].map(([time, title, detail]) => (
-            <div className="audit-row" key={`${time}-${title}`}>
-              <span className="audit-time">{time}</span>
-              <span className="audit-marker" />
-              <span className="audit-copy">
-                <strong>{title}</strong>
-                <span>{detail}</span>
-              </span>
-            </div>
-          ))}
+          {ops.auditError ? (
+            <EmptyWorkspace title="Audit trail unavailable" detail={ops.auditError} />
+          ) : audit.length === 0 ? (
+            <EmptyWorkspace
+              title="No audit events recorded"
+              detail="Append-only events will appear here as governed actions occur."
+            />
+          ) : (
+            audit.map((event) => (
+              <div className="audit-row" key={event.id}>
+                <span className="audit-time">{formatTimestamp(event.created_at)}</span>
+                <span className="audit-marker" />
+                <span className="audit-copy">
+                  <strong>{event.action}</strong>
+                  <span>
+                    {event.object_type}
+                    {event.object_id ? ` · ${event.object_id}` : ""}
+                  </span>
+                </span>
+              </div>
+            ))
+          )}
         </div>
         <p className="workspace-disclaimer">
-          Sample audit entries are illustrative. Production records are
-          append-only and persisted server-side.
+          Append-only records read from PostgreSQL. Visible to administrators only.
         </p>
       </section>
     );
@@ -710,22 +774,41 @@ function SecondaryWorkspace({
           <ChartNoAxesCombined size={19} className="lineage-heading-icon" />
         </div>
         {[
-          { label: "Topics with 2+ sources", value: 82, count: "9 of 11", color: "bar-saffron" },
-          { label: "Claims reviewed", value: 68, count: "17 of 25", color: "bar-teal" },
-          { label: "Episodes with approved outline", value: 50, count: "2 of 4", color: "bar-blue" },
-        ].map((item) => (
-          <div className="report-bar-row" key={item.label}>
-            <span className="report-label">{item.label}</span>
-            <span className="report-count">{item.count}</span>
-            <span className="report-track">
-              <span className={item.color} style={{ width: `${item.value}%` }} />
-            </span>
-            <span className="report-percent">{item.value}%</span>
-          </div>
-        ))}
+          {
+            label: "Topics with 2+ sources",
+            part: summary?.topics_with_multiple_sources ?? 0,
+            whole: summary?.topics_total ?? 0,
+            color: "bar-saffron",
+          },
+          {
+            label: "Claims reviewed",
+            part: summary?.claims_reviewed ?? 0,
+            whole: summary?.claims_total ?? 0,
+            color: "bar-teal",
+          },
+          {
+            label: "Episodes with an approval",
+            part: summary?.episodes_with_approval ?? 0,
+            whole: summary?.episodes_total ?? 0,
+            color: "bar-blue",
+          },
+        ].map((item) => {
+          const value = percentage(item.part, item.whole);
+          return (
+            <div className="report-bar-row" key={item.label}>
+              <span className="report-label">{item.label}</span>
+              <span className="report-count">
+                {item.part} of {item.whole}
+              </span>
+              <span className="report-track">
+                <span className={item.color} style={{ width: `${value}%` }} />
+              </span>
+              <span className="report-percent">{value}%</span>
+            </div>
+          );
+        })}
         <p className="workspace-disclaimer">
-          Preview metrics use example values. Live reports will be calculated
-          from persisted workflow and review records.
+          Calculated from persisted topic, claim, and approval records.
         </p>
       </section>
     );
@@ -734,21 +817,104 @@ function SecondaryWorkspace({
   return null;
 }
 
-export function GovernanceDashboard() {
-  const [activeSection, setActiveSection] = useState<WorkspaceSection>("overview");
-  const [topics, setTopics] = useState(initialTopics);
-  const [selectedId, setSelectedId] = useState(initialTopics[0].id);
+function AuthenticatedGovernanceDashboard({ keycloak }: { keycloak: Keycloak }) {
+  const [activeSection, setActiveSection] = useState<WorkspaceSection>("topics");
+  const [topics, setTopics] = useState<Topic[]>([]);
+  const [topicsLoading, setTopicsLoading] = useState(true);
+  const [topicsError, setTopicsError] = useState("");
+  const [topicSaving, setTopicSaving] = useState(false);
+  const [selectedId, setSelectedId] = useState("");
+  const [reloadTopics, setReloadTopics] = useState(0);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<TopicFilter>("All topics");
   const [notice, setNotice] = useState("");
   const [showNewTopic, setShowNewTopic] = useState(false);
-  const [independenceConfirmed, setIndependenceConfirmed] = useState(false);
-  const [approvalDecisions, setApprovalDecisions] = useState<
-    Record<string, "Approved" | "Changes requested">
-  >({});
-  const [approvalNotice, setApprovalNotice] = useState("");
+  const [deciding, setDeciding] = useState(false);
+  const [ops, setOps] = useState<OperationsData>(emptyOperations);
 
   const selectedTopic = topics.find((topic) => topic.id === selectedId) ?? topics[0];
+  const canWriteTopics = keycloak.hasRealmRole("editor") || keycloak.hasRealmRole("admin");
+
+  useEffect(() => {
+    let active = true;
+    async function loadTopics() {
+      setTopicsLoading(true);
+      setTopicsError("");
+      try {
+        await keycloak.updateToken(30);
+        if (!keycloak.token) throw new Error("Your session expired. Sign in again.");
+        const records = await listTopics(keycloak.token);
+        if (active) {
+          const loadedTopics = records.map(topicFromRecord);
+          setTopics(loadedTopics);
+          setSelectedId(loadedTopics[0]?.id ?? "");
+        }
+      } catch (error) {
+        if (active) {
+          setTopicsError(error instanceof Error ? error.message : "Could not load topics.");
+        }
+      } finally {
+        if (active) setTopicsLoading(false);
+      }
+    }
+
+    void loadTopics();
+    return () => {
+      active = false;
+    };
+  }, [keycloak, reloadTopics]);
+
+  useEffect(() => {
+    let active = true;
+    async function loadOperations() {
+      setOps((current) => ({ ...current, loading: true }));
+      try {
+        await keycloak.updateToken(30);
+        if (!keycloak.token) throw new Error("Your session expired. Sign in again.");
+        const token = keycloak.token;
+        const isAdmin = keycloak.hasRealmRole("admin");
+        const [summary, approvals, audit] = await Promise.allSettled([
+          getGovernanceSummary(token),
+          listApprovals(token),
+          isAdmin ? listAuditEvents(token) : Promise.resolve([] as AuditEventRecord[]),
+        ]);
+        if (!active) return;
+        setOps({
+          loading: false,
+          summary: summary.status === "fulfilled" ? summary.value : null,
+          summaryError:
+            summary.status === "rejected"
+              ? errorMessage(summary.reason, "Could not load summary.")
+              : "",
+          approvals: approvals.status === "fulfilled" ? approvals.value : [],
+          approvalsError:
+            approvals.status === "rejected"
+              ? errorMessage(approvals.reason, "Could not load approvals.")
+              : "",
+          audit: audit.status === "fulfilled" ? audit.value : [],
+          auditError:
+            audit.status === "rejected"
+              ? errorMessage(audit.reason, "Could not load audit events.")
+              : !isAdmin
+                ? "Only administrators can read the audit trail."
+                : "",
+        });
+      } catch (error) {
+        if (!active) return;
+        setOps({
+          ...emptyOperations,
+          loading: false,
+          summaryError: errorMessage(error, "Could not load governance data."),
+        });
+      }
+    }
+
+    void loadOperations();
+    return () => {
+      active = false;
+    };
+  }, [keycloak, reloadTopics]);
+
   const visibleTopics = useMemo(() => {
     const normalizedQuery = search.trim().toLowerCase();
     return topics.filter((topic) => {
@@ -760,63 +926,129 @@ export function GovernanceDashboard() {
           .includes(normalizedQuery);
       const matchesFilter =
         filter === "All topics" ||
-        (filter === "Needs attention" && topic.claimStatus !== "Verified") ||
+        (filter === "Not approved" && topic.status !== "Approved") ||
         (filter === "Has 2+ sources" && topic.sources >= 2);
       return matchesSearch && matchesFilter && sectionTopicFilter(activeSection, topic);
     });
   }, [activeSection, filter, search, topics]);
   const details = sectionDetails[activeSection];
 
-  function recordDecision(status: ClaimStatus) {
-    setTopics((currentTopics) =>
-      currentTopics.map((topic) =>
-        topic.id === selectedTopic.id
-          ? {
-              ...topic,
-              claimStatus: status,
-              status: status === "Verified" ? "Ready to plan" : topic.status,
-            }
-          : topic,
-      ),
-    );
-    setNotice(
-      status === "Verified"
-        ? "Demo decision noted locally. The API is not connected."
-        : "Follow-up request noted locally. The API is not connected.",
-    );
+  async function signOut() {
+    try {
+      await keycloak.logout({ redirectUri: window.location.origin });
+    } catch (error) {
+      setTopicsError(
+        error instanceof Error ? `Could not sign out: ${error.message}` : "Could not sign out.",
+      );
+    }
   }
 
-  function createTopic(title: string, category: string) {
-    const newTopic: Topic = {
-      id: `topic-${Date.now()}`,
-      title,
-      subtitle: "New idea · research not started",
-      category: category.trim() || "General",
-      status: "Researching",
-      claimStatus: "Needs review",
-      sources: 0,
-      updated: "Just now",
-      owner: "Editorial team",
-      priority: "Medium",
-      claim: "A factual claim has not been drafted yet.",
-      claimContext: "Research and evidence must be added before fact review.",
-      evidence: [],
-    };
-    setTopics((currentTopics) => [newTopic, ...currentTopics]);
-    setSelectedId(newTopic.id);
-    setActiveSection("topics");
-    setSearch("");
-    setFilter("All topics");
-    setIndependenceConfirmed(false);
-    setNotice("Video idea added to this browser session only.");
-    setShowNewTopic(false);
+  async function researchTopic() {
+    if (!selectedTopic) return;
+    setDeciding(true);
+    setTopicsError("");
+    try {
+      await keycloak.updateToken(30);
+      if (!keycloak.token) throw new Error("Your session expired. Sign in again.");
+      const result = await runResearch(keycloak.token, selectedTopic.id);
+      setNotice(
+        `Research saved: ${result.claim_count} unverified claim(s) from ${result.source_count} source(s). Review them in Fact verification.`,
+      );
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not run research.");
+    } finally {
+      setDeciding(false);
+    }
+  }
+
+  async function planEpisode() {
+    if (!selectedTopic) return;
+    setDeciding(true);
+    setTopicsError("");
+    try {
+      await keycloak.updateToken(30);
+      if (!keycloak.token) throw new Error("Your session expired. Sign in again.");
+      const record = await generateEpisodePlan(keycloak.token, selectedTopic.id);
+      setNotice(`Episode plan revision ${record.revision} saved as a draft for review.`);
+      setActiveSection("episodes");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not plan the episode.");
+    } finally {
+      setDeciding(false);
+    }
+  }
+
+  async function recordDecision(decision: "approve" | "reject", note: string) {
+    if (!selectedTopic) return;
+    setDeciding(true);
+    setTopicsError("");
+    try {
+      await keycloak.updateToken(30);
+      if (!keycloak.token) throw new Error("Your session expired. Sign in again.");
+      const record = await decideTopic(keycloak.token, selectedTopic.id, { decision, note });
+      const updated = topicFromRecord(record);
+      setTopics((currentTopics) =>
+        currentTopics.map((topic) => (topic.id === updated.id ? updated : topic)),
+      );
+      setNotice(
+        decision === "approve"
+          ? "Topic approved and recorded in the audit trail."
+          : "Topic rejected and recorded in the audit trail.",
+      );
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not record the decision.");
+    } finally {
+      setDeciding(false);
+    }
+  }
+
+  async function createTopic(title: string, category: string) {
+    setTopicSaving(true);
+    setTopicsError("");
+    try {
+      await keycloak.updateToken(30);
+      if (!keycloak.token) throw new Error("Your session expired. Sign in again.");
+      const record = await createTopicRequest(keycloak.token, {
+        title,
+        category: category.trim() || "General",
+      });
+      const topic = topicFromRecord(record);
+      setTopics((currentTopics) => [topic, ...currentTopics]);
+      setOps((current) =>
+        current.summary
+          ? {
+              ...current,
+              summary: { ...current.summary, topics_total: current.summary.topics_total + 1 },
+            }
+          : current,
+      );
+      setSelectedId(topic.id);
+      setActiveSection("topics");
+      setSearch("");
+      setFilter("All topics");
+      setShowNewTopic(false);
+      setNotice("Topic saved to PostgreSQL.");
+    } catch (error) {
+      setTopicsError(error instanceof Error ? error.message : "Could not save topic.");
+    } finally {
+      setTopicSaving(false);
+    }
   }
 
   return (
     <div className="dashboard-shell">
-      <Sidebar activeSection={activeSection} onNavigate={setActiveSection} />
+      <Sidebar
+        activeSection={activeSection}
+        onNavigate={setActiveSection}
+        topicCount={topics.length}
+        canWriteTopics={canWriteTopics}
+      />
       <div className="dashboard-main">
-        <TopBar onSearch={setSearch} search={search} />
+        <TopBar
+          onLogout={() => void signOut()}
+          onSearch={setSearch}
+          search={search}
+        />
 
         <main className="dashboard-content">
           <nav aria-label="Governance sections" className="mobile-nav">
@@ -850,73 +1082,86 @@ export function GovernanceDashboard() {
               <div className="eyebrow-row">
                 <span className="page-eyebrow">{details.eyebrow}</span>
                 <span className="eyebrow-dot" />
-                <span className="page-date">Monday, 26 October 2026</span>
+                <span className="page-date">Live PostgreSQL records</span>
               </div>
               <h1>{details.title}</h1>
               <p>{details.description}</p>
             </div>
-            <Button
-              className="new-topic-button"
-              onClick={() => setShowNewTopic(true)}
-              type="button"
-            >
-              <CirclePlus size={17} />
-              New topic
-            </Button>
+            {canWriteTopics && (
+              <Button
+                className="new-topic-button"
+                onClick={() => setShowNewTopic(true)}
+                type="button"
+              >
+                <CirclePlus size={17} />
+                New topic
+              </Button>
+            )}
           </div>
 
           <PreviewBanner />
+          {notice && (
+            <p className="review-notice" role="status">
+              <CheckCheck size={15} />
+              {notice}
+            </p>
+          )}
 
-          <section aria-label="Editorial overview" className="metric-grid">
+          {activeSection === "overview" && (
+            <section aria-label="Editorial overview" className="metric-grid">
             <MetricCard
               icon={Orbit}
               label="Topics in queue"
-              note="Across 6 learning themes"
+              note={`${ops.summary?.topics_approved ?? 0} approved`}
               tone="orange"
-              trend="up"
-              value="12"
+              value={String(topics.length)}
             />
             <MetricCard
               icon={FileSearch}
               label="Claims to review"
-              note="Across 4 research briefs"
+              note={`${ops.summary?.claims_verified ?? 0} verified of ${ops.summary?.claims_total ?? 0}`}
               tone="blue"
-              trend="down"
-              value="07"
+              value={String(
+                (ops.summary?.claims_total ?? 0) - (ops.summary?.claims_reviewed ?? 0),
+              )}
             />
             <MetricCard
               icon={Clapperboard}
-              label="Episodes in progress"
-              note="Next publish · Tue, 27 Oct"
+              label="Episodes"
+              note={`${ops.summary?.episodes_with_approval ?? 0} with an approval`}
               tone="green"
-              value="03"
+              value={String(ops.summary?.episodes_total ?? 0)}
             />
             <MetricCard
               icon={ShieldCheck}
-              label="Ready for approval"
-              note="One item needs your attention"
+              label="Approval decisions"
+              note="Recorded across all revisions"
               tone="violet"
-              value="02"
+              value={String(ops.summary?.approvals_total ?? 0)}
             />
-          </section>
+            </section>
+          )}
+          {activeSection === "overview" && ops.summaryError && (
+            <p className="review-notice" role="alert">
+              Could not load overview metrics: {ops.summaryError}
+            </p>
+          )}
 
+          {activeSection === "fact-check" && <ClaimsWorkspace keycloak={keycloak} />}
+          {activeSection === "episodes" && <EpisodesWorkspace keycloak={keycloak} />}
+
+          {activeSection !== "fact-check" && activeSection !== "episodes" && (
           <div className="workspace-grid">
             <section className="queue-panel">
               <div className="queue-heading">
                 <div>
-                  <span className="panel-eyebrow">
-                    {activeSection === "fact-check" ? "CLAIM REVIEW QUEUE" : "EDITORIAL PIPELINE"}
-                  </span>
+                  <span className="panel-eyebrow">EDITORIAL PIPELINE</span>
                   <h2>
-                    {activeSection === "fact-check"
-                      ? "Claims needing a closer look"
-                      : activeSection === "research"
-                        ? "Research in motion"
-                        : activeSection === "episodes"
-                          ? "Stories moving forward"
-                          : activeSection === "topics"
-                            ? "Explore the topic queue"
-                            : "Your topic queue"}
+                    {activeSection === "research"
+                      ? "Research in motion"
+                      : activeSection === "topics"
+                        ? "Explore the topic queue"
+                        : "Your topic queue"}
                   </h2>
                 </div>
                 <Button
@@ -943,20 +1188,34 @@ export function GovernanceDashboard() {
                       onClick={() => setFilter(topicFilter)}
                       type="button"
                     >
-                      {topicFilter === "Needs attention" && <span className="filter-dot" />}
+                      {topicFilter === "Not approved" && <span className="filter-dot" />}
                       {topicFilter}
                     </button>
                   ))}
                 </div>
                 <button
                   className="filter-button"
-                  onClick={() => setFilter(filter === "All topics" ? "Needs attention" : "All topics")}
+                  onClick={() => setFilter(filter === "All topics" ? "Not approved" : "All topics")}
                   type="button"
                 >
                   <ListFilter size={15} />
                   Filter
                 </button>
               </div>
+
+              {topicsError && (
+                <div className="empty-queue" role="alert">
+                  <strong>Could not load or save topics</strong>
+                  <span>{topicsError}</span>
+                  <button
+                    className="footer-link"
+                    onClick={() => setReloadTopics((value) => value + 1)}
+                    type="button"
+                  >
+                    Retry
+                  </button>
+                </div>
+              )}
 
               <div className="topic-list">
                 <div className="topic-list-head">
@@ -967,15 +1226,16 @@ export function GovernanceDashboard() {
                   <span>UPDATED</span>
                   <span aria-hidden="true" />
                 </div>
-                {visibleTopics.length > 0 ? (
+                {topicsLoading ? (
+                  <div className="empty-queue" role="status">Loading topics from PostgreSQL...</div>
+                ) : visibleTopics.length > 0 ? (
                   visibleTopics.map((topic) => (
                     <TopicRow
                       key={topic.id}
                       onSelect={() => {
                         setSelectedId(topic.id);
                         setNotice("");
-                                  setIndependenceConfirmed(false);
-                                }}
+                      }}
                       selected={selectedId === topic.id}
                       topic={topic}
                     />
@@ -984,7 +1244,11 @@ export function GovernanceDashboard() {
                   <div className="empty-queue">
                     <FileSearch size={21} />
                     <strong>No topics match this view</strong>
-                    <span>Try another filter or search term.</span>
+                    <span>
+                      {topics.length === 0
+                        ? "Create a topic to begin building your real workspace."
+                        : "Try another filter or search term."}
+                    </span>
                   </div>
                 )}
               </div>
@@ -998,80 +1262,79 @@ export function GovernanceDashboard() {
               </div>
             </section>
 
-            <ReviewPanel
-              key={selectedTopic.id}
-              notice={notice}
-              onDecision={recordDecision}
-              independenceConfirmed={independenceConfirmed}
-              onIndependenceChange={setIndependenceConfirmed}
-              topic={selectedTopic}
-            />
+            {selectedTopic ? (
+              <ReviewPanel
+                key={selectedTopic.id}
+                notice={notice}
+                onDecision={recordDecision}
+                onPlan={planEpisode}
+                onResearch={researchTopic}
+                canDecide={canWriteTopics}
+                busy={deciding}
+                topic={selectedTopic}
+              />
+            ) : (
+              <aside className="review-panel">
+                <h2>Topic details</h2>
+                <p>Select a persisted topic to view its record.</p>
+              </aside>
+            )}
           </div>
-
-          {activeSection !== "overview" && (
-            <SecondaryWorkspace
-              approvalDecisions={approvalDecisions}
-              approvalNotice={approvalNotice}
-              onApprovalDecision={(title, decision) => {
-                setApprovalDecisions((current) => ({ ...current, [title]: decision }));
-                setApprovalNotice(
-                  `${title}: ${
-                    decision === "Approved" ? "approval noted" : "changes requested"
-                  } in this preview.`,
-                );
-              }}
-              onOpenFactReview={() => {
-                setSelectedId("chandrayaan-3");
-                setActiveSection("fact-check");
-                setIndependenceConfirmed(false);
-                setNotice("");
-              }}
-              section={activeSection}
-              topics={topics}
-            />
           )}
 
-          <div className="bottom-grid">
+          {activeSection !== "overview" &&
+            activeSection !== "fact-check" &&
+            activeSection !== "episodes" && (
+            <SecondaryWorkspace section={activeSection} ops={ops} />
+          )}
+
+          {activeSection === "overview" && (
+            <div className="bottom-grid">
             <section className="bottom-card publishing-card">
               <div className="bottom-card-heading">
                 <div>
-                  <span className="panel-eyebrow">PUBLISHING RHYTHM</span>
-                  <h2>Video release schedule</h2>
+                  <span className="panel-eyebrow">RECENT DECISIONS</span>
+                  <h2>Latest approvals</h2>
                 </div>
                 <button
                   className="icon-button subtle-icon-button"
                   type="button"
-                  aria-label="Open episode queue"
-                  onClick={() => setActiveSection("episodes")}
+                  aria-label="Open approvals"
+                  onClick={() => setActiveSection("approvals")}
                 >
                   <ArrowUpRight size={16} />
                 </button>
               </div>
               <div className="publish-week">
-                {[
-                  { day: "TUE", date: "20", label: "The Moon's quiet side", state: "Published", done: true },
-                  { day: "FRI", date: "23", label: "What makes sourdough rise?", state: "Published", done: true },
-                  { day: "TUE", date: "27", label: "Compound interest, simply explained", state: "In review", done: false },
-                ].map((item) => (
-                  <div className="publish-item" key={item.label}>
-                    <span className="publish-date">
-                      <small>{item.day}</small>
-                      <strong>{item.date}</strong>
-                    </span>
-                    <span className="publish-line" />
-                    <span className="publish-copy">
-                      <strong>{item.label}</strong>
-                      <small>{item.state}</small>
-                    </span>
-                    {item.done ? (
-                      <span className="publish-check">
-                        <Check size={13} />
+                {ops.approvals.length === 0 ? (
+                  <EmptyWorkspace
+                    title="No approvals yet"
+                    detail="Approval decisions will appear here."
+                  />
+                ) : (
+                  ops.approvals.slice(0, 3).map((item) => (
+                    <div className="publish-item" key={item.id}>
+                      <span className="publish-date">
+                        <small>REV</small>
+                        <strong>{item.revision}</strong>
                       </span>
-                    ) : (
-                      <span className="publish-pending" />
-                    )}
-                  </div>
-                ))}
+                      <span className="publish-line" />
+                      <span className="publish-copy">
+                        <strong>{item.episode_title}</strong>
+                        <small>
+                          {item.stage} · {item.decision}
+                        </small>
+                      </span>
+                      {item.decision === "approved" ? (
+                        <span className="publish-check">
+                          <Check size={13} />
+                        </span>
+                      ) : (
+                        <span className="publish-pending" />
+                      )}
+                    </div>
+                  ))
+                )}
               </div>
             </section>
 
@@ -1079,41 +1342,37 @@ export function GovernanceDashboard() {
               <div className="bottom-card-heading">
                 <div>
                   <span className="panel-eyebrow">RECENT ACTIVITY</span>
-                  <h2>Good work, moving forward</h2>
+                  <h2>Newest topics</h2>
                 </div>
-                <span className="activity-live">
-                  <span />
-                  LIVE
-                </span>
               </div>
               <div className="activity-list">
-                <div className="activity-item">
-                  <span className="activity-avatar activity-orange">AN</span>
-                  <span>
-                    <strong>Ananya added 2 sources</strong>
-                    <small>Aditya-L1 · 12 min ago</small>
-                  </span>
-                </div>
-                <div className="activity-item">
-                  <span className="activity-avatar activity-blue">RO</span>
-                  <span>
-                    <strong>Rohan updated research notes</strong>
-                    <small>What makes sourdough rise? · 48 min ago</small>
-                  </span>
-                </div>
-                <div className="activity-item">
-                  <span className="activity-avatar activity-green">ME</span>
-                  <span>
-                    <strong>Meera refined a video brief</strong>
-                    <small>Compound interest · Yesterday</small>
-                  </span>
-                </div>
+                {topics.length === 0 ? (
+                  <EmptyWorkspace
+                    title="No topics yet"
+                    detail="Create a topic to start the activity feed."
+                  />
+                ) : (
+                  topics.slice(0, 3).map((topic) => (
+                    <div className="activity-item" key={topic.id}>
+                      <span className="activity-avatar activity-orange">
+                        {topic.category.slice(0, 2).toUpperCase()}
+                      </span>
+                      <span>
+                        <strong>{topic.title}</strong>
+                        <small>
+                          {topic.category} · {topic.status}
+                        </small>
+                      </span>
+                    </div>
+                  ))
+                )}
               </div>
               <button className="activity-link" type="button" onClick={() => setActiveSection("audit")}>
-                See all activity <ArrowRight size={14} />
+                Open audit trail <ArrowRight size={14} />
               </button>
             </section>
-          </div>
+            </div>
+          )}
 
           <footer className="dashboard-footer">
             <span>Made for curious minds, reviewed with care.</span>
@@ -1126,8 +1385,20 @@ export function GovernanceDashboard() {
       </div>
 
       {showNewTopic && (
-        <NewTopicDialog onClose={() => setShowNewTopic(false)} onCreate={createTopic} />
+        <NewTopicDialog
+          onClose={() => setShowNewTopic(false)}
+          onCreate={(title, category) => void createTopic(title, category)}
+          saving={topicSaving}
+        />
       )}
     </div>
+  );
+}
+
+export function GovernanceDashboard() {
+  return (
+    <KeycloakGate>
+      {(keycloak) => <AuthenticatedGovernanceDashboard keycloak={keycloak} />}
+    </KeycloakGate>
   );
 }

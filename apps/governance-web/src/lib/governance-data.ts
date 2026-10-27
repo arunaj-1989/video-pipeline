@@ -10,7 +10,7 @@ export type WorkspaceSection =
   | "reports";
 
 export type ClaimStatus = "Needs review" | "Verified" | "Follow-up";
-export type TopicStatus = "In review" | "Researching" | "Ready to plan" | "Approved";
+export type TopicStatus = "In review" | "Researching" | "Ready to plan" | "Approved" | "Rejected";
 
 export type EvidenceSource = {
   publisher: string;
@@ -35,6 +35,55 @@ export type Topic = {
   evidence: EvidenceSource[];
 };
 
+export function topicFromRecord(record: {
+  id: string;
+  title: string;
+  category: string;
+  status: string;
+  ranking_score: number | null;
+  source_count: number;
+  updated_at: string;
+}): Topic {
+  const statusLabels: Record<string, TopicStatus> = {
+    proposed: "In review",
+    researching: "Researching",
+    ready_to_plan: "Ready to plan",
+    approved: "Approved",
+    rejected: "Rejected",
+  };
+  const updatedAt = new Date(record.updated_at);
+  const elapsedMinutes = Math.max(0, Math.floor((Date.now() - updatedAt.getTime()) / 60_000));
+  const updated =
+    elapsedMinutes < 1
+      ? "Just now"
+      : elapsedMinutes < 60
+        ? `${elapsedMinutes} min ago`
+        : elapsedMinutes < 1_440
+          ? `${Math.floor(elapsedMinutes / 60)} hr ago`
+          : updatedAt.toLocaleDateString();
+
+  return {
+    id: record.id,
+    title: record.title,
+    subtitle: record.category || "General",
+    category: record.category || "General",
+    status: statusLabels[record.status] ?? "In review",
+    claimStatus: "Needs review",
+    sources: record.source_count,
+    updated,
+    owner: "",
+    priority:
+      record.ranking_score !== null && record.ranking_score >= 70
+        ? "High"
+        : record.ranking_score !== null && record.ranking_score < 35
+          ? "Low"
+          : "Medium",
+    claim: "",
+    claimContext: "",
+    evidence: [],
+  };
+}
+
 export const navigationGroups: {
   title: string;
   items: { id: WorkspaceSection; label: string; icon: string; count?: number }[];
@@ -44,15 +93,15 @@ export const navigationGroups: {
     items: [
       { id: "overview", label: "Overview", icon: "layout-dashboard" },
       { id: "topics", label: "Topic queue", icon: "orbit", count: 12 },
-      { id: "research", label: "Research desk", icon: "book-open-check", count: 4 },
-      { id: "fact-check", label: "Fact verification", icon: "badge-check", count: 7 },
-      { id: "episodes", label: "Episode queue", icon: "clapperboard", count: 3 },
+      { id: "research", label: "Research desk", icon: "book-open-check" },
+      { id: "fact-check", label: "Fact verification", icon: "badge-check" },
+      { id: "episodes", label: "Episode queue", icon: "clapperboard" },
     ],
   },
   {
     title: "Governance",
     items: [
-      { id: "approvals", label: "Approval center", icon: "stamp", count: 3 },
+      { id: "approvals", label: "Approval center", icon: "stamp" },
       { id: "lineage", label: "Content lineage", icon: "git-branch" },
       { id: "audit", label: "Audit log", icon: "scroll-text" },
       { id: "reports", label: "Governance reports", icon: "chart-no-axes-combined" },
