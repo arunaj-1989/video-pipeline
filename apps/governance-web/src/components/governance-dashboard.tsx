@@ -345,6 +345,44 @@ function TopicRow({
   );
 }
 
+const activityStages = {
+  research: [
+    "Searching the web and Indian government sources...",
+    "Capturing source snapshots...",
+    "Drafting claims with the local AI model...",
+    "Saving research to PostgreSQL...",
+  ],
+  plan: [
+    "Indexing verified evidence...",
+    "Retrieving relevant evidence...",
+    "Writing the outline and short concepts with the local AI model...",
+    "Validating citations and saving the draft...",
+  ],
+} as const;
+
+type Activity = keyof typeof activityStages;
+
+function ProgressStatus({ activity }: { activity: Activity }) {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    const timer = window.setInterval(() => setSeconds((value) => value + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const stages = activityStages[activity];
+  const stage = stages[Math.min(Math.floor(seconds / 15), stages.length - 1)];
+  return (
+    <div aria-live="polite" className="progress-status" role="status">
+      <div className="progress-bar" aria-hidden="true">
+        <span />
+      </div>
+      <p>{stage}</p>
+      <small>
+        {seconds}s elapsed. This runs on your machine and can take a few minutes; keep this page open.
+      </small>
+    </div>
+  );
+}
+
 function ReviewPanel({
   topic,
   onDecision,
@@ -353,6 +391,7 @@ function ReviewPanel({
   notice,
   canDecide,
   busy,
+  activity,
 }: {
   topic: Topic;
   onDecision: (decision: "approve" | "reject", note: string) => void;
@@ -361,6 +400,7 @@ function ReviewPanel({
   notice: string;
   canDecide: boolean;
   busy: boolean;
+  activity: Activity | null;
 }) {
   const [note, setNote] = useState("");
   const pending = topic.status === "In review";
@@ -489,14 +529,15 @@ function ReviewPanel({
             variant="outline"
           >
             <FileSearch size={15} />
-            {busy ? "Working..." : "Run research"}
+            {activity === "research" ? "Researching..." : "Run research"}
           </Button>
           <Button className="approve-button" disabled={busy} onClick={onPlan} type="button">
             <Sparkles size={16} />
-            {busy ? "Planning with local AI..." : "Plan episode"}
+            {activity === "plan" ? "Planning..." : "Plan episode"}
           </Button>
         </div>
       )}
+      {activity && <ProgressStatus activity={activity} key={activity} />}
       {notice && (
         <p className="review-notice" role="status">
           <CheckCheck size={15} />
@@ -830,6 +871,7 @@ function AuthenticatedGovernanceDashboard({ keycloak }: { keycloak: Keycloak }) 
   const [notice, setNotice] = useState("");
   const [showNewTopic, setShowNewTopic] = useState(false);
   const [deciding, setDeciding] = useState(false);
+  const [activity, setActivity] = useState<Activity | null>(null);
   const [ops, setOps] = useState<OperationsData>(emptyOperations);
 
   const selectedTopic = topics.find((topic) => topic.id === selectedId) ?? topics[0];
@@ -946,6 +988,8 @@ function AuthenticatedGovernanceDashboard({ keycloak }: { keycloak: Keycloak }) 
   async function researchTopic() {
     if (!selectedTopic) return;
     setDeciding(true);
+    setActivity("research");
+    setNotice("");
     setTopicsError("");
     try {
       await keycloak.updateToken(30);
@@ -958,12 +1002,15 @@ function AuthenticatedGovernanceDashboard({ keycloak }: { keycloak: Keycloak }) 
       setNotice(error instanceof Error ? error.message : "Could not run research.");
     } finally {
       setDeciding(false);
+      setActivity(null);
     }
   }
 
   async function planEpisode() {
     if (!selectedTopic) return;
     setDeciding(true);
+    setActivity("plan");
+    setNotice("");
     setTopicsError("");
     try {
       await keycloak.updateToken(30);
@@ -975,6 +1022,7 @@ function AuthenticatedGovernanceDashboard({ keycloak }: { keycloak: Keycloak }) 
       setNotice(error instanceof Error ? error.message : "Could not plan the episode.");
     } finally {
       setDeciding(false);
+      setActivity(null);
     }
   }
 
@@ -1271,6 +1319,7 @@ function AuthenticatedGovernanceDashboard({ keycloak }: { keycloak: Keycloak }) 
                 onResearch={researchTopic}
                 canDecide={canWriteTopics}
                 busy={deciding}
+                activity={activity}
                 topic={selectedTopic}
               />
             ) : (

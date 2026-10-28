@@ -130,7 +130,7 @@ class LocalFileArtifactInspector:
             "-v",
             "error",
             "-show_entries",
-            "format=duration:stream=codec_type,width,height",
+            "format=duration,format_name:stream=codec_type,codec_name,width,height",
             "-of",
             "json",
             str(path),

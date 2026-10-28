@@ -137,6 +137,9 @@ export type EpisodeRecord = {
   approvals: number;
   latest_render_status: string | null;
   created_at: string;
+  stage: "none" | "plan" | "storyboard";
+  plan_approved: boolean;
+  render_approved: boolean;
 };
 
 export function listClaims(accessToken: string): Promise<ClaimRecord[]> {
@@ -218,15 +221,66 @@ export function runResearch(accessToken: string, topicId: string): Promise<Resea
 }
 
 export type ApprovalDecision = "approved" | "rejected" | "changes_requested";
+export type ApprovalStage = "plan" | "render";
 
 export function recordPlanApproval(
   accessToken: string,
   episodeId: string,
-  input: { decision: ApprovalDecision; note: string },
+  input: { decision: ApprovalDecision; note: string; stage?: ApprovalStage },
 ): Promise<ApprovalRecord> {
   return request<ApprovalRecord>(`/episodes/${episodeId}/approvals`, accessToken, {
     method: "POST",
     body: JSON.stringify(input),
+  });
+}
+
+export function createStoryboard(
+  accessToken: string,
+  episodeId: string,
+): Promise<{ episode_id: string; revision: number; scene_count: number }> {
+  return request(`/episodes/${episodeId}/storyboard`, accessToken, { method: "POST" });
+}
+
+export type RenderSubmission = {
+  job_id: string;
+  episode_id: string;
+  status: string;
+  remote_job_id: string | null;
+};
+
+export function submitRender(
+  accessToken: string,
+  episodeId: string,
+  estimatedCostUsd: string,
+): Promise<RenderSubmission> {
+  return request<RenderSubmission>(`/episodes/${episodeId}/render`, accessToken, {
+    method: "POST",
+    body: JSON.stringify({ estimated_cost_usd: estimatedCostUsd }),
+  });
+}
+
+export type RenderAsset = { kind: string; variant: string; download_url: string | null };
+export type RenderStatus = {
+  job_id: string | null;
+  status: string | null;
+  failure_reason: string | null;
+  assets: RenderAsset[];
+  message: string | null;
+};
+
+export function getRenderStatus(accessToken: string, episodeId: string): Promise<RenderStatus> {
+  return request<RenderStatus>(`/episodes/${episodeId}/render`, accessToken);
+}
+
+export function refreshRender(accessToken: string, episodeId: string): Promise<RenderStatus> {
+  return request<RenderStatus>(`/episodes/${episodeId}/render/refresh`, accessToken, {
+    method: "POST",
+  });
+}
+
+export function cancelRender(accessToken: string, episodeId: string): Promise<RenderStatus> {
+  return request<RenderStatus>(`/episodes/${episodeId}/render/cancel`, accessToken, {
+    method: "POST",
   });
 }
 

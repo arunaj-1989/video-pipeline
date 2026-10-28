@@ -6,16 +6,23 @@ import { useEffect, useState, type FormEvent } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
+  createStoryboard,
+  cancelRender,
   getEpisodePlan,
+  getRenderStatus,
   listClaims,
   listEpisodes,
   recordPlanApproval,
+  refreshRender,
   reviewClaim,
+  submitRender,
   type ApprovalDecision,
+  type ApprovalStage,
   type ClaimCategory,
   type ClaimRecord,
   type EpisodePlanRecord,
   type EpisodeRecord,
+  type RenderStatus,
   type ReviewDecision,
 } from "@/lib/operations-api";
 
@@ -60,6 +67,7 @@ export function ClaimsWorkspace({ keycloak }: { keycloak: Keycloak }) {
   const [claims, setClaims] = useState<ClaimRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [submitError, setSubmitError] = useState("");
   const [selectedId, setSelectedId] = useState("");
   const [decision, setDecision] = useState<ReviewDecision>("verified");
   const [category, setCategory] = useState<ClaimCategory>("verified");
@@ -98,7 +106,7 @@ export function ClaimsWorkspace({ keycloak }: { keycloak: Keycloak }) {
     event.preventDefault();
     if (!selected || !note.trim()) return;
     setSaving(true);
-    setError("");
+    setSubmitError("");
     setMessage("");
     try {
       const updated = await reviewClaim(await freshToken(keycloak), selected.id, {
@@ -109,8 +117,10 @@ export function ClaimsWorkspace({ keycloak }: { keycloak: Keycloak }) {
       setClaims((current) => current.map((claim) => (claim.id === updated.id ? updated : claim)));
       setNote("");
       setMessage(`Decision recorded: ${updated.verification_status.replace("_", " ")}.`);
-    } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : "Could not save the review.");
+    } catch (reviewError) {
+      setSubmitError(
+        reviewError instanceof Error ? reviewError.message : "Could not save the review.",
+      );
     } finally {
       setSaving(false);
     }
@@ -127,9 +137,11 @@ export function ClaimsWorkspace({ keycloak }: { keycloak: Keycloak }) {
           <span className="quiet-count">{claims.length} claims</span>
         </div>
         {error && (
-          <div className="empty-queue" role="alert">
-            <strong>Claim request failed</strong>
-            <span>{error}</span>
+          <div className="inline-alert" role="alert">
+            <span>
+              <strong>Claim request failed</strong>
+              {error}
+            </span>
             <button
               className="footer-link"
               onClick={() => {
@@ -153,11 +165,12 @@ export function ClaimsWorkspace({ keycloak }: { keycloak: Keycloak }) {
           ) : (
             claims.map((claim) => (
               <button
-                className={`topic-row${selected?.id === claim.id ? " topic-row-selected" : ""}`}
+                className={`topic-row claim-row${selected?.id === claim.id ? " topic-row-selected" : ""}`}
                 key={claim.id}
                 onClick={() => {
                   setSelectedId(claim.id);
                   setMessage("");
+                  setSubmitError("");
                 }}
                 type="button"
               >
@@ -210,7 +223,7 @@ export function ClaimsWorkspace({ keycloak }: { keycloak: Keycloak }) {
           )}
           {selected.review_note && <p>Last review note: {selected.review_note}</p>}
           {canReview ? (
-            <form onSubmit={(event) => void submit(event)}>
+            <form className="review-form" onSubmit={(event) => void submit(event)}>
               <label>
                 Decision
                 <select
@@ -253,6 +266,13 @@ export function ClaimsWorkspace({ keycloak }: { keycloak: Keycloak }) {
           ) : (
             <p className="workspace-disclaimer">
               Only fact reviewers and administrators can record claim decisions.
+            </p>
+          )}
+          {submitError && (
+            <p className="review-error" role="alert">
+              {submitError}
+              {submitError.includes("independent") &&
+                " Choose Needs follow-up or Reject, or add a second independent source by re-running research."}
             </p>
           )}
           {message && (
@@ -327,11 +347,13 @@ function ApprovalForm({
   keycloak,
   episodeId,
   revision,
+  stage = "plan",
   onRecorded,
 }: {
   keycloak: Keycloak;
   episodeId: string;
   revision: number | null;
+  stage?: ApprovalStage;
   onRecorded: () => void;
 }) {
   const [decision, setDecision] = useState<ApprovalDecision>("approved");
@@ -340,11 +362,12 @@ function ApprovalForm({
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const canApprove = keycloak.hasRealmRole("editor") || keycloak.hasRealmRole("admin");
+  const subject = stage === "render" ? "storyboard (render approval)" : "plan";
 
   if (!canApprove) {
     return (
       <p className="workspace-disclaimer">
-        Only editors and administrators can record plan approvals.
+        Only editors and administrators can record {stage} approvals.
       </p>
     );
   }
@@ -358,6 +381,7 @@ function ApprovalForm({
       const saved = await recordPlanApproval(await freshToken(keycloak), episodeId, {
         decision,
         note: note.trim(),
+        stage,
       });
       setMessage(`Recorded "${saved.decision}" for revision ${saved.revision}.`);
       setNote("");
@@ -370,8 +394,11 @@ function ApprovalForm({
   }
 
   return (
-    <form onSubmit={(event) => void submit(event)}>
-      <h3>Review latest plan{revision ? ` (revision ${revision})` : ""}</h3>
+    <form className="review-form" onSubmit={(event) => void submit(event)}>
+      <h3>
+        Review latest {subject}
+        {revision ? ` (revision ${revision})` : ""}
+      </h3>
       <label>
         Decision
         <select
@@ -403,6 +430,223 @@ function ApprovalForm({
       )}
       {error && <p role="alert">{error}</p>}
     </form>
+  );
+}
+
+const activeRenderStatuses = ["queued", "submitted", "running"];
+
+function PipelineActions({
+  keycloak,
+  episode,
+  onChanged,
+}: {
+  keycloak: Keycloak;
+  episode: EpisodeRecord;
+  onChanged: () => void;
+}) {
+  const [cost, setCost] = useState("2.00");
+  const [busy, setBusy] = useState<"storyboard" | "render" | null>(null);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const canAct = keycloak.hasRealmRole("editor") || keycloak.hasRealmRole("admin");
+  const rendering =
+    episode.latest_render_status !== null &&
+    activeRenderStatuses.includes(episode.latest_render_status);
+
+  async function run(kind: "storyboard" | "render") {
+    setBusy(kind);
+    setMessage("");
+    setError("");
+    try {
+      const token = await freshToken(keycloak);
+      if (kind === "storyboard") {
+        const saved = await createStoryboard(token, episode.id);
+        setMessage(`Storyboard created with ${saved.scene_count} scene(s). Approve it for render next.`);
+      } else {
+        const job = await submitRender(token, episode.id, cost);
+        setMessage(`Render job sent to RunPod (status ${job.status}). Track it on the Monitoring page.`);
+      }
+      onChanged();
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : "The request failed.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  let step: React.ReactNode;
+  if (episode.stage === "plan") {
+    step = episode.plan_approved ? (
+      <Button disabled={busy !== null || !canAct} onClick={() => void run("storyboard")} type="button">
+        {busy === "storyboard" ? "Creating storyboard..." : "Create storyboard"}
+      </Button>
+    ) : (
+      <p className="workspace-disclaimer">
+        Step 1 of 3: approve the plan below, then create a storyboard.
+      </p>
+    );
+  } else if (!episode.render_approved) {
+    step = (
+      <>
+        <p className="workspace-disclaimer">
+          Step 2 of 3: the storyboard is ready. Record a render approval for it below.
+        </p>
+        <ApprovalForm
+          episodeId={episode.id}
+          keycloak={keycloak}
+          onRecorded={onChanged}
+          revision={episode.latest_revision}
+          stage="render"
+        />
+      </>
+    );
+  } else if (rendering) {
+    step = (
+      <p className="review-notice" role="status">
+        Render {episode.latest_render_status}. Track it on the Monitoring page.
+      </p>
+    );
+  } else {
+    step = (
+      <div className="review-form">
+        <h3>Step 3 of 3: generate video</h3>
+        <label>
+          Estimated cost (USD)
+          <input
+            inputMode="decimal"
+            onChange={(event) => setCost(event.target.value)}
+            value={cost}
+          />
+        </label>
+        <Button
+          className="approve-button"
+          disabled={busy !== null || !canAct || !/^\d+(\.\d{1,2})?$/.test(cost) || Number(cost) <= 0}
+          onClick={() => void run("render")}
+          type="button"
+        >
+          {busy === "render" ? "Sending to RunPod..." : "Generate video"}
+        </Button>
+        {episode.latest_render_status && (
+          <p className="workspace-disclaimer">
+            Previous render: {episode.latest_render_status}.
+          </p>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="pipeline-actions">
+      {step}
+      {message && (
+        <p className="review-notice" role="status">
+          <CheckCheck size={15} />
+          {message}
+        </p>
+      )}
+      {error && <p className="review-error" role="alert">{error}</p>}
+      {episode.latest_render_status && (
+        <RenderOutputs keycloak={keycloak} episode={episode} onChanged={onChanged} />
+      )}
+    </div>
+  );
+}
+
+function RenderOutputs({
+  keycloak,
+  episode,
+  onChanged,
+}: {
+  keycloak: Keycloak;
+  episode: EpisodeRecord;
+  onChanged: () => void;
+}) {
+  const [status, setStatus] = useState<RenderStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function refresh() {
+    setBusy(true);
+    setError("");
+    try {
+      const token = await freshToken(keycloak);
+      setStatus(await refreshRender(token, episode.id));
+      onChanged();
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "The request failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const token = await freshToken(keycloak);
+        const loaded = await getRenderStatus(token, episode.id);
+        if (!cancelled) setStatus(loaded);
+      } catch (loadError) {
+        if (!cancelled) {
+          setError(loadError instanceof Error ? loadError.message : "The request failed.");
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [keycloak, episode.id, episode.latest_render_status]);
+
+  async function cancel() {
+    if (!window.confirm("Cancel this render job on RunPod?")) return;
+    setBusy(true);
+    setError("");
+    try {
+      const token = await freshToken(keycloak);
+      setStatus(await cancelRender(token, episode.id));
+      onChanged();
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "The request failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const current = status?.status ?? episode.latest_render_status;
+  const canRefresh = keycloak.hasRealmRole("editor") || keycloak.hasRealmRole("admin");
+  return (
+    <div className="review-form">
+      <h3>Render output</h3>
+      <p className="workspace-disclaimer">Latest render: {current}.</p>
+      {canRefresh && (
+        <Button disabled={busy} onClick={() => void refresh()} type="button">
+          {busy ? "Checking..." : "Refresh render status"}
+        </Button>
+      )}
+      {canRefresh && current !== null && activeRenderStatuses.includes(current) && (
+        <Button disabled={busy} onClick={() => void cancel()} type="button" variant="outline">
+          Cancel render
+        </Button>
+      )}
+      {status?.failure_reason && <p className="review-error">{status.failure_reason}</p>}
+      {status?.message && <p className="review-error" role="alert">{status.message}</p>}
+      {status && status.assets.length > 0 && (
+        <ul>
+          {status.assets.map((asset) => (
+            <li key={`${asset.kind}-${asset.variant}`}>
+              {asset.download_url ? (
+                <a href={asset.download_url} rel="noreferrer" target="_blank">
+                  {asset.kind.replace("_", " ")} ({asset.variant})
+                </a>
+              ) : (
+                `${asset.kind} (${asset.variant}) - link unavailable`
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {error && <p className="review-error" role="alert">{error}</p>}
+    </div>
   );
 }
 
@@ -500,11 +744,18 @@ export function EpisodesWorkspace({ keycloak }: { keycloak: Keycloak }) {
               ) : plan ? (
                 <>
                   <PlanView record={plan} />
-                  <ApprovalForm
-                    episodeId={episode.id}
+                  {episode.stage === "plan" && (
+                    <ApprovalForm
+                      episodeId={episode.id}
+                      keycloak={keycloak}
+                      onRecorded={() => setReloadKey((key) => key + 1)}
+                      revision={plan.revision}
+                    />
+                  )}
+                  <PipelineActions
+                    episode={episode}
                     keycloak={keycloak}
-                    onRecorded={() => setReloadKey((key) => key + 1)}
-                    revision={plan.revision}
+                    onChanged={() => setReloadKey((key) => key + 1)}
                   />
                 </>
               ) : (
@@ -514,8 +765,8 @@ export function EpisodesWorkspace({ keycloak }: { keycloak: Keycloak }) {
         ))
       )}
       <p className="workspace-disclaimer">
-        Plans are drafts for editor review. Approve a topic, then use Plan episode on its details
-        panel. Open a plan to record an approval decision on its latest revision.
+        Plans are drafts for editor review. Open an episode to approve its plan, create a
+        storyboard, approve it for render, and send it to RunPod with Generate video.
       </p>
     </section>
   );

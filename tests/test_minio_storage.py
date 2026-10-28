@@ -76,6 +76,38 @@ def test_minio_store_uploads_checksummed_objects_and_downloads_them() -> None:
     assert store.key_from_uri(uri) == "episodes/episode-1/episode.mp4"
 
 
+def test_minio_creates_missing_bucket_and_presigns_downloads() -> None:
+    from botocore.exceptions import ClientError
+
+    class BucketClient(FakeS3Client):
+        def __init__(self) -> None:
+            super().__init__()
+            self.created: list[str] = []
+
+        def head_bucket(self, *, Bucket) -> None:
+            if not self.created:
+                raise ClientError({"Error": {"Code": "404"}}, "HeadBucket")
+
+        def create_bucket(self, *, Bucket) -> None:
+            self.created.append(Bucket)
+
+        def generate_presigned_url(self, operation, *, Params, ExpiresIn) -> str:
+            return f"http://localhost:9000/{Params['Bucket']}/{Params['Key']}?ttl={ExpiresIn}"
+
+    client = BucketClient()
+    store = _store(client)
+    store.ensure_bucket()
+    store.ensure_bucket()
+
+    assert client.created == ["universal-video-assets"]
+    url = store.presigned_get_url("s3://universal-video-assets/a/b.mp4", expires_seconds=60)
+    assert url.endswith("/a/b.mp4?ttl=60")
+    with pytest.raises(ValueError):
+        store.presigned_get_url("s3://other-bucket/a.mp4")
+    with pytest.raises(ValueError):
+        store.presigned_get_url("s3://universal-video-assets/a.mp4", expires_seconds=0)
+
+
 def test_minio_file_upload_and_path_validation(tmp_path) -> None:
     client = FakeS3Client()
     store = _store(client)

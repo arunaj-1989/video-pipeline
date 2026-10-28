@@ -12,7 +12,15 @@ from universal_video_maker import __version__
 from universal_video_maker.claims_api import router as claims_router
 from universal_video_maker.config import Settings, get_settings
 from universal_video_maker.db.session import create_database_engine, create_session_factory
-from universal_video_maker.episodes_api import PlanGeneratorFactory, build_plan_generator_factory
+from universal_video_maker.episodes_api import (
+    ArtifactInspectorFactory,
+    ObjectStoreFactory,
+    PlanGeneratorFactory,
+    RenderClientFactory,
+    build_plan_generator_factory,
+    default_artifact_inspector,
+    default_object_store,
+)
 from universal_video_maker.episodes_api import router as episodes_router
 from universal_video_maker.errors import ApplicationError
 from universal_video_maker.governance_api import router as governance_router
@@ -29,6 +37,7 @@ from universal_video_maker.research_api import (
     build_research_workflow_factory,
 )
 from universal_video_maker.research_api import router as research_router
+from universal_video_maker.runpod import RunPodServerlessClient
 from universal_video_maker.topics_api import router as topics_router
 
 
@@ -38,6 +47,9 @@ def create_app(
     token_verifier: TokenVerifier | None = None,
     plan_generator_factory: PlanGeneratorFactory | None = None,
     research_workflow_factory: ResearchWorkflowFactory | None = None,
+    render_client_factory: RenderClientFactory | None = None,
+    object_store_factory: ObjectStoreFactory | None = None,
+    artifact_inspector_factory: ArtifactInspectorFactory | None = None,
 ) -> FastAPI:
     settings = settings or get_settings()
     configure_logging(settings.log_level)
@@ -71,6 +83,12 @@ def create_app(
     app.state.ready = False
     app.state.token_verifier = token_verifier or KeycloakTokenVerifier.from_settings(settings)
     app.state.session_factory = session_factory
+    app.state.settings = settings
+    app.state.render_client_factory = render_client_factory or RunPodServerlessClient.from_settings
+    app.state.object_store_factory = object_store_factory or default_object_store
+    app.state.artifact_inspector_factory = (
+        artifact_inspector_factory or default_artifact_inspector
+    )
     app.state.research_workflow_factory = (
         research_workflow_factory or build_research_workflow_factory(settings)
     )

@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "tests": [
+    {
+      "name": "ping",
+      "input": { "ping": true },
+      "timeout": 60000
+    }
+  ]
+}

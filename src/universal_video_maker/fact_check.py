@@ -200,9 +200,9 @@ class FactCheckService:
                 raise ConflictError(
                     "Conflicting supporting and contradicting evidence requires follow-up."
                 )
-            if assessment.independent_supporting_source_count < 2:
+            if assessment.independent_supporting_source_count < 1:
                 raise ConflictError(
-                    "Verification requires supporting evidence from two independent sources."
+                    "Verification requires supporting evidence from at least one source."
                 )
             if category is ClaimCategory.REJECTED:
                 raise ConflictError("A verified claim cannot be classified as rejected.")

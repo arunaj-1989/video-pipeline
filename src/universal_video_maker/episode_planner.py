@@ -232,7 +232,9 @@ class EpisodePlannerService:
                     Source.canonical_url == item.canonical_url,
                 )
             )
-            if current_excerpt is None or item.text not in current_excerpt:
+            if current_excerpt is None or " ".join(item.text.split()) not in " ".join(
+                current_excerpt.split()
+            ):
                 raise ConflictError(
                     f"Retrieved evidence is no longer current or verified: {item.chunk_id}"
                 )

@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from universal_video_maker.db.models import ResearchRecord, Topic
+from universal_video_maker.db.models import ResearchRecord, Source, Topic
 from universal_video_maker.errors import NotFoundError
 from universal_video_maker.providers.ollama import OllamaClient, OllamaClientError
 from universal_video_maker.providers.tavily import (
@@ -25,6 +27,23 @@ from universal_video_maker.research import (
     ResearchService,
     _canonicalize_url,
 )
+
+LOW_QUALITY_DOMAINS: tuple[str, ...] = (
+    "reddit.com",
+    "facebook.com",
+    "twitter.com",
+    "x.com",
+    "instagram.com",
+    "tiktok.com",
+    "pinterest.com",
+    "quora.com",
+    "youtube.com",
+    "medium.com",
+)
+
+
+INDIA_GOVERNMENT_DOMAINS: tuple[str, ...] = ("gov.in", "nic.in")
+GOVERNMENT_RESULT_LIMIT = 4
 
 
 class _EvidencePayload(BaseModel):
@@ -87,6 +106,10 @@ class OllamaResearchAssistant:
                     "requirements": [
                         "Cite source URLs exactly as provided.",
                         "Each excerpt must be an exact substring of its source excerpt.",
+                        "When several sources state the same fact, put one evidence item for "
+                        "each of those sources under a single claim instead of repeating the "
+                        "claim; corroboration across independent sources is required to verify.",
+                        "Never return the same claim twice.",
                         "Include contradictory and contextual evidence when present.",
                         "If evidence is insufficient, return no claim and add an open question.",
                     ],
@@ -99,8 +122,12 @@ class OllamaResearchAssistant:
             payload = _ResearchPayload.model_validate(response)
             source_text = {source.canonical_url: source.text for source in sources}
             claims: list[CandidateClaim] = []
+            seen_claims: set[str] = set()
             dropped = 0
             for claim in payload.claims:
+                claim_key = " ".join(claim.claim_text.lower().split())
+                if claim_key in seen_claims:
+                    continue
                 evidence: list[EvidenceDraft] = []
                 seen_urls: set[str] = set()
                 for item in claim.evidence:
@@ -119,6 +146,7 @@ class OllamaResearchAssistant:
                         )
                     )
                 if evidence:
+                    seen_claims.add(claim_key)
                     claims.append(
                         CandidateClaim(
                             claim_text=claim.claim_text,
@@ -174,9 +202,49 @@ class TavilyOllamaResearchWorkflow:
         topic = self._session.get(Topic, topic_id)
         if topic is None:
             raise NotFoundError(f"Topic {topic_id} does not exist.")
-        results = self._tavily.search(topic.title, max_results=self._max_results)
+        results = self._tavily.search(
+            topic.title,
+            max_results=self._max_results,
+            exclude_domains=LOW_QUALITY_DOMAINS,
+        )
+        # A second search restricted to Indian central government sites; optional.
+        try:
+            government = self._tavily.search(
+                topic.title,
+                max_results=GOVERNMENT_RESULT_LIMIT,
+                include_domains=INDIA_GOVERNMENT_DOMAINS,
+            )
+        except TavilyClientError:
+            government = ()
+        seen = {result.url for result in results}
+        results = (*results, *(item for item in government if item.url not in seen))
         if not results:
             raise TavilyClientError("Tavily returned no usable source excerpts.")
         sources = tuple(self._snapshot_store.capture(result) for result in results)
+        sources, skipped = self._without_changed_sources(sources)
+        if not sources:
+            raise TavilyClientError(
+                "All returned sources were already stored with different excerpts."
+            )
         draft = self._assistant.draft(topic=topic, sources=sources)
+        if skipped:
+            draft = replace(draft, findings={**draft.findings, "skipped_changed_sources": skipped})
         return ResearchService(self._session).create_research(draft)
+
+    def _without_changed_sources(
+        self, sources: tuple[CapturedSource, ...]
+    ) -> tuple[tuple[CapturedSource, ...], int]:
+        """Stored source snapshots are immutable, so a re-fetched URL with new text is skipped."""
+        kept: list[CapturedSource] = []
+        for captured in sources:
+            existing = self._session.scalar(
+                select(Source).where(Source.canonical_url == captured.canonical_url)
+            )
+            if existing is None or (
+                existing.content_hash == captured.content_hash
+                and existing.title == captured.title
+                and existing.publisher == captured.publisher
+                and existing.source_type == captured.source_type
+            ):
+                kept.append(captured)
+        return tuple(kept), len(sources) - len(kept)

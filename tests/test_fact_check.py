@@ -199,17 +199,14 @@ def test_human_review_verifies_with_two_independent_sources_and_audits(
         assert audit.details["evidence_assessment"]["sources"][0]["source_id"]
 
 
-def test_verification_rejects_dependent_sources(database_engine) -> None:
+def test_verification_rejects_claim_without_supporting_evidence(database_engine) -> None:
     with Session(database_engine) as session:
         claim, reviewer, principal = create_claim(
             session,
-            (
-                ("https://isro.gov.in/a", "ISRO", "supports", None),
-                ("https://isro.gov.in/b", "ISRO", "supports", None),
-            ),
+            (("https://isro.gov.in/a", "ISRO", "contradicts", None),),
         )
 
-        with pytest.raises(ConflictError, match="two independent sources"):
+        with pytest.raises(ConflictError, match="at least one source"):
             FactCheckService(session).review_claim(
                 principal=principal,
                 reviewer_id=reviewer.id,

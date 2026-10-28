@@ -1,0 +1,16 @@
+services:
+  minio:
+    image: cgr.dev/chainguard/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${SBE_MINIO_ACCESS_KEY:?SBE_MINIO_ACCESS_KEY is required}
+      MINIO_ROOT_PASSWORD: ${SBE_MINIO_SECRET_KEY:?SBE_MINIO_SECRET_KEY is required}
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - minio-data:/data
+
+volumes:
+  minio-data:

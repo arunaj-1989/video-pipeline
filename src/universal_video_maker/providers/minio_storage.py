@@ -149,6 +149,36 @@ class MinioObjectStore:
             raise MinioStorageError("MinIO returned an invalid object body.")
         return payload
 
+    def ensure_bucket(self) -> None:
+        try:
+            self._client.head_bucket(Bucket=self.bucket)
+            return
+        except ClientError as error:
+            code = str(error.response.get("Error", {}).get("Code", ""))
+            if code not in {"404", "NoSuchBucket", "NotFound"}:
+                raise MinioStorageError("MinIO bucket check failed.") from error
+        except BotoCoreError as error:
+            raise MinioStorageError("MinIO bucket check failed.") from error
+        try:
+            self._client.create_bucket(Bucket=self.bucket)
+        except (BotoCoreError, ClientError) as error:
+            raise MinioStorageError("MinIO bucket creation failed.") from error
+
+    def presigned_get_url(self, storage_uri: str, *, expires_seconds: int = 900) -> str:
+        key = self.key_from_uri(storage_uri)
+        if not 1 <= expires_seconds <= 3600:
+            raise ValueError("Download links must expire within one hour.")
+        try:
+            return str(
+                self._client.generate_presigned_url(
+                    "get_object",
+                    Params={"Bucket": self.bucket, "Key": key},
+                    ExpiresIn=expires_seconds,
+                )
+            )
+        except (BotoCoreError, ClientError) as error:
+            raise MinioStorageError("MinIO download link could not be created.") from error
+
     def key_from_uri(self, storage_uri: str) -> str:
         parsed = urlsplit(storage_uri)
         if (

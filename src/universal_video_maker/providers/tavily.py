@@ -119,6 +119,8 @@ class TavilySearchClient:
         query: str,
         *,
         max_results: int | None = None,
+        exclude_domains: tuple[str, ...] = (),
+        include_domains: tuple[str, ...] = (),
     ) -> tuple[TavilySearchResult, ...]:
         normalized_query = query.strip()
         if not normalized_query:
@@ -127,7 +129,7 @@ class TavilySearchClient:
         if not 1 <= result_limit <= 20:
             raise ValueError("Tavily max_results must be between one and twenty.")
 
-        request_body = {
+        request_body: dict[str, Any] = {
             "api_key": self._api_key,
             "query": normalized_query,
             "search_depth": "basic",
@@ -137,6 +139,10 @@ class TavilySearchClient:
             "include_raw_content": False,
             "include_published_date": True,
         }
+        if exclude_domains:
+            request_body["exclude_domains"] = list(exclude_domains)
+        if include_domains:
+            request_body["include_domains"] = list(include_domains)
         try:
             raw_response = self._transport.request(
                 "POST",

@@ -5,7 +5,8 @@ param(
     [switch]$NoBrowser,
     [switch]$NoWait,
     [switch]$SkipKeycloak,
-    [switch]$SkipPostgres
+    [switch]$SkipPostgres,
+    [switch]$SkipMinio
 )
 
 $ErrorActionPreference = "Stop"
@@ -172,6 +173,24 @@ if ($startApi -and -not $SkipPostgres) {
         }
         Write-Host "PostgreSQL is ready: 127.0.0.1:$dbPort"
     }
+}
+
+# Rendered videos are stored in a local MinIO bucket; only a loopback endpoint is managed here.
+if ($startApi -and -not $SkipMinio) {
+    if (-not (Test-TcpPort "127.0.0.1" 9000)) {
+        Assert-DockerReady "Local MinIO"
+        Write-Host "Starting MinIO on port 9000..."
+        & (Join-Path $projectRoot "scripts\start-local-minio.ps1")
+        $minioReady = $false
+        for ($attempt = 0; $attempt -lt 60 -and -not $minioReady; $attempt++) {
+            $minioReady = Test-TcpPort "127.0.0.1" 9000
+            if (-not $minioReady) { Start-Sleep -Seconds 1 }
+        }
+        if (-not $minioReady) {
+            throw "MinIO did not accept connections on port 9000. Check: docker compose -f compose.minio.yaml logs minio"
+        }
+    }
+    Write-Host "MinIO is ready: http://127.0.0.1:9000 (console: http://127.0.0.1:9001)"
 }
 
 if ($startWeb -and -not $SkipKeycloak) {

@@ -38,6 +38,10 @@ ACTIVE_JOB_STATUSES = ("queued", "submitted", "running")
 class RunPodClientError(Exception):
     """A sanitized RunPod API transport or response error."""
 
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
 
 class HttpTransport(Protocol):
     def request(
@@ -67,7 +71,7 @@ class UrllibTransport:
                 return response.read()
         except HTTPError as exc:
             raise RunPodClientError(
-                f"RunPod API returned HTTP {exc.code}."
+                f"RunPod API returned HTTP {exc.code}.", status_code=exc.code
             ) from exc
         except URLError as exc:
             raise RunPodClientError("RunPod API request failed.") from exc
@@ -434,7 +438,22 @@ class RunPodJobService:
         chosen_endpoint = endpoint_id or self._settings.runpod_serverless_endpoint_id
         if not chosen_endpoint:
             raise ValueError("RunPod endpoint ID must be configured before cancellation.")
-        remote = client.cancel(chosen_endpoint, job.remote_job_id)
+        try:
+            remote = client.cancel(chosen_endpoint, job.remote_job_id)
+        except RunPodClientError as error:
+            if error.status_code != 404:
+                raise
+            # The job or its endpoint no longer exists remotely, so nothing can still be running.
+            job.status = "cancelled"
+            job.completed_at = datetime.now(UTC)
+            self._audit(
+                actor_id,
+                job,
+                "render.job_cancelled_locally",
+                {"remote_job_id": job.remote_job_id, "reason": "remote job not found"},
+            )
+            self._session.flush()
+            return job
         self._apply_remote_state(job, remote)
         self._audit(
             actor_id,

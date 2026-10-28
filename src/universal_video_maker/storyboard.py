@@ -26,6 +26,10 @@ from universal_video_maker.security import Permission, Principal, require_permis
 MAX_SCENE_TEXT_LENGTH = 4000
 
 
+def _squash(text: str) -> str:
+    return " ".join(text.split())
+
+
 @dataclass(frozen=True)
 class StoryboardSceneDraft:
     visual_description: str
@@ -276,9 +280,9 @@ class StoryboardService:
             and title == reference["source_title"]
             and publisher == reference["publisher"]
             and canonical_url == reference["canonical_url"]
-            and evidence_text in excerpt
-            and quote in evidence_text
-            and quote in excerpt
+            and _squash(evidence_text) in _squash(excerpt)
+            and _squash(quote) in _squash(evidence_text)
+            and _squash(quote) in _squash(excerpt)
             for (
                 excerpt,
                 claim_text,

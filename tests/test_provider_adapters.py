@@ -10,7 +10,6 @@ from universal_video_maker.config import Settings
 from universal_video_maker.db.models import (
     Base,
     Claim,
-    ResearchRecord,
     Source,
     Topic,
 )
@@ -181,7 +180,16 @@ def test_tavily_ollama_workflow_persists_only_unverified_candidate_claims(
                         "content": excerpt,
                     }
                 ]
-            }
+            },
+            {
+                "results": [
+                    {
+                        "title": "PIB note",
+                        "url": "https://pib.gov.in/cacao",
+                        "content": excerpt,
+                    }
+                ]
+            },
         ]
     )
     assistant_client = FakeChatClient(
@@ -195,7 +203,12 @@ def test_tavily_ollama_workflow_persists_only_unverified_candidate_claims(
                             "source_url": "https://example.org/cacao",
                             "excerpt": excerpt,
                             "support_type": "supports",
-                        }
+                        },
+                        {
+                            "source_url": "https://pib.gov.in/cacao",
+                            "excerpt": excerpt,
+                            "support_type": "supports",
+                        },
                     ],
                 }
             ],
@@ -223,7 +236,11 @@ def test_tavily_ollama_workflow_persists_only_unverified_candidate_claims(
         assert source is not None
         assert source.source_type == "tavily_search_excerpt"
         assert source.storage_uri.startswith("file:")
-        assert session.scalar(select(ResearchRecord).where(ResearchRecord.id == record.id))
+        assert len(session.scalars(select(Source)).all()) == 2
+        assert json.loads(transport.calls[1][3] or b"{}")["include_domains"] == [
+            "gov.in",
+            "nic.in",
+        ]
 
 
 def test_research_assistant_discards_quotes_not_present_in_captured_source() -> None:

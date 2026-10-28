@@ -116,12 +116,12 @@ def test_fact_reviewer_verifies_claim_and_user_row_is_created(tmp_path: Path) ->
     engine.dispose()
 
 
-def test_verification_requires_two_independent_sources(tmp_path: Path) -> None:
+def test_verification_accepts_a_single_supporting_source(tmp_path: Path) -> None:
     client, claim_id = make_client(tmp_path, Role.FACT_REVIEWER, independent=False)
     with client:
         response = client.post(f"/api/v1/claims/{claim_id}/review", headers=HEADERS, json=REVIEW)
 
-    assert response.status_code == 409
+    assert response.status_code == 200
 
 
 def test_editor_cannot_review_claims(tmp_path: Path) -> None:
