@@ -36,19 +36,23 @@ from media import (
 )
 
 VOICE_MODEL = os.environ.get("PIPER_VOICE", "/models/voice/en_US-lessac-medium.onnx")
-IMAGE_MODEL = os.environ.get("IMAGE_MODEL", "stabilityai/sdxl-turbo")
-VIDEO_MODEL = os.environ.get("VIDEO_MODEL", "Lightricks/LTX-Video")
-# The video model is ~26 GB, far more than the container disk, so it lives on a network volume.
+VOICE_ENGINE = os.environ.get("VOICE_ENGINE", "kokoro")
+IMAGE_MODEL = os.environ.get("IMAGE_MODEL", "black-forest-labs/FLUX.1-schnell")
+VIDEO_MODEL = os.environ.get("VIDEO_MODEL", "Wan-AI/Wan2.1-I2V-14B-720P")
+# The video model lives on a network volume when available, or container disk if sufficiently sized.
 VIDEO_CACHE = os.environ.get(
     "VIDEO_CACHE", "/runpod-volume/video-models" if Path("/runpod-volume").is_dir() else ""
 )
 ANIMATE = os.environ.get("ANIMATE_SCENES", "1") != "0"
 MUSIC = os.environ.get("BACKGROUND_MUSIC", "1") != "0"
-VIDEO_STEPS = int(os.environ.get("VIDEO_STEPS", "25"))
-CLIP_FRAMES = 97
+VIDEO_STEPS = int(os.environ.get("VIDEO_STEPS", "30"))
+CLIP_FRAMES = 81
 CLIP_FPS = 24
-CLIP_SIZE = {"landscape": (768, 448), "portrait": (448, 768)}
-VIDEO_NEGATIVE = "worst quality, inconsistent motion, blurry, jittery, distorted, text, watermark"
+CLIP_SIZE = {"landscape": (1280, 720), "portrait": (720, 1280)}
+VIDEO_NEGATIVE = (
+    "worst quality, blurry, static image, deformed, inconsistent motion, jittery, "
+    "distorted, text, watermark, cartoon, CGI render, unrealistic anatomy"
+)
 LANDSCAPE = (1920, 1080)
 PORTRAIT = (1080, 1920)
 EPISODE_SECONDS = 180
@@ -61,56 +65,80 @@ def get_pipeline():
     global _pipeline
     if _pipeline is None:
         import torch
-        from diffusers import AutoPipelineForText2Image
 
-        _pipeline = AutoPipelineForText2Image.from_pretrained(
-            IMAGE_MODEL, torch_dtype=torch.float16, variant="fp16"
-        ).to("cuda")
+        if "flux" in IMAGE_MODEL.lower():
+            from diffusers import FluxPipeline
+
+            _pipeline = FluxPipeline.from_pretrained(
+                IMAGE_MODEL, torch_dtype=torch.bfloat16
+            )
+            _pipeline.enable_model_cpu_offload()
+        else:
+            from diffusers import AutoPipelineForText2Image
+
+            _pipeline = AutoPipelineForText2Image.from_pretrained(
+                IMAGE_MODEL, torch_dtype=torch.float16, variant="fp16"
+            ).to("cuda")
     return _pipeline
 
 
 def get_video_pipeline():
     global _video_pipeline
     if _video_pipeline is None:
-        if not VIDEO_CACHE:
-            raise RuntimeError(
-                "Animated scenes need a Network Volume (mounted at /runpod-volume) to hold the "
-                "~26 GB video model. Attach one to the endpoint, or set ANIMATE_SCENES=0."
-            )
         import torch
-        from diffusers import LTXImageToVideoPipeline
-        from huggingface_hub import snapshot_download
 
-        path = snapshot_download(
-            VIDEO_MODEL,
-            cache_dir=VIDEO_CACHE,
-            allow_patterns=[
-                "model_index.json", "scheduler/*", "tokenizer/*",
-                "text_encoder/*", "transformer/*", "vae/*",
-            ],
-        )  # fmt: skip
-        _video_pipeline = LTXImageToVideoPipeline.from_pretrained(path, torch_dtype=torch.bfloat16)
-        _video_pipeline.enable_model_cpu_offload()
-        _video_pipeline.vae.enable_tiling()
+        if "wan" in VIDEO_MODEL.lower():
+            from diffusers import WanImageToVideoPipeline
+
+            _video_pipeline = WanImageToVideoPipeline.from_pretrained(
+                VIDEO_MODEL,
+                torch_dtype=torch.bfloat16,
+                cache_dir=VIDEO_CACHE if VIDEO_CACHE else None,
+            )
+            _video_pipeline.enable_model_cpu_offload()
+        else:
+            if not VIDEO_CACHE:
+                raise RuntimeError(
+                    "Animated scenes need a Network Volume (mounted at /runpod-volume) to hold the "
+                    "video model. Attach one to the endpoint, or set ANIMATE_SCENES=0."
+                )
+            from diffusers import LTXImageToVideoPipeline
+            from huggingface_hub import snapshot_download
+
+            path = snapshot_download(
+                VIDEO_MODEL,
+                cache_dir=VIDEO_CACHE,
+                allow_patterns=[
+                    "model_index.json", "scheduler/*", "tokenizer/*",
+                    "text_encoder/*", "transformer/*", "vae/*",
+                ],
+            )  # fmt: skip
+            _video_pipeline = LTXImageToVideoPipeline.from_pretrained(path, torch_dtype=torch.bfloat16)
+            _video_pipeline.enable_model_cpu_offload()
+            _video_pipeline.vae.enable_tiling()
     return _video_pipeline
 
 
 def animate(image_path: Path, prompt: str, orientation: str, output: Path) -> None:
-    """Turn a still image into a ~4 second clip with the image-to-video model."""
+    """Turn a still image into a cinematic continuous video shot with the image-to-video model."""
     from PIL import Image, ImageOps
 
     width, height = CLIP_SIZE[orientation]
     image = ImageOps.fit(Image.open(image_path).convert("RGB"), (width, height))
+    enhanced_prompt = (
+        f"{prompt[:500]}. 35mm lens, cinematic lighting, photorealistic physics, "
+        f"smooth natural camera motion, high detail 8k resolution."
+    )
     result = get_video_pipeline()(
         image=image,
-        prompt=f"{prompt[:500]}. Gentle, natural camera motion, cinematic, high detail.",
+        prompt=enhanced_prompt,
         negative_prompt=VIDEO_NEGATIVE,
         width=width,
         height=height,
         num_frames=CLIP_FRAMES,
         frame_rate=CLIP_FPS,
         num_inference_steps=VIDEO_STEPS,
-        guidance_scale=3.0,
+        guidance_scale=4.5,
     )
     frames = (frame.convert("RGB").tobytes() for frame in result.frames[0])
     write_video(frames, width, height, CLIP_FPS, output)
@@ -174,6 +202,21 @@ def generate_image(prompt: str, width: int, height: int, path: Path) -> None:
 
 
 def synthesize(text: str, path: Path) -> None:
+    if VOICE_ENGINE == "kokoro":
+        try:
+            import numpy as np
+            import soundfile as sf
+            from kokoro import KPipeline
+
+            pipeline = KPipeline(lang_code="a")
+            generator = pipeline(text, voice="af_heart", speed=1.0)
+            audio_chunks = [chunk for _, _, chunk in generator]
+            if audio_chunks:
+                sf.write(str(path), np.concatenate(audio_chunks), 24000)
+                return
+        except Exception:
+            pass  # Fall back to piper if kokoro dependencies or weights are not installed
+
     result = subprocess.run(
         ["piper", "--model", VOICE_MODEL, "--output_file", str(path)],
         input=text,

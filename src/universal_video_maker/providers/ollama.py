@@ -26,7 +26,7 @@ class OllamaClient:
         *,
         base_url: str = "http://localhost:11434",
         model: str = "qwen2.5:7b",
-        timeout_seconds: int = 180,
+        timeout_seconds: int = 600,
         transport: HttpTransport | None = None,
     ) -> None:
         parsed = urlsplit(base_url)

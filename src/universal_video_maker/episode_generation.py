@@ -164,7 +164,7 @@ class OllamaEpisodePlanGenerator:
             )
         except (ValidationError, ValueError) as error:
             raise OllamaClientError(
-                "Ollama episode plan did not satisfy timing and evidence requirements."
+                f"Ollama episode plan did not satisfy timing and evidence requirements: {error}"
             ) from error
 
 

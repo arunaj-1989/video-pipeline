@@ -132,11 +132,10 @@ class TavilySearchClient:
         request_body: dict[str, Any] = {
             "api_key": self._api_key,
             "query": normalized_query,
-            "search_depth": "basic",
-            "chunks_per_source": 1,
-            "max_results": result_limit,
-            "include_answer": False,
-            "include_raw_content": False,
+            "search_depth": "advanced",      # Deep search across more sources
+            "chunks_per_source": 3,           # Pull multiple paragraphs
+            "include_raw_content": False,     # Or True if you want full page text
+            "max_results": 10,
             "include_published_date": True,
         }
         if exclude_domains:

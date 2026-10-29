@@ -261,8 +261,9 @@ def generate_plan(
         ) from error
     except OllamaClientError as error:
         raise ServiceUnavailableError(
-            "The local AI model (Ollama) could not produce a valid plan. "
-            "Check that Ollama is running and the models are installed."
+            f"The local AI model (Ollama) could not produce a valid plan: {error}. "
+            "If this says it timed out, the model is running slowly; retry, or use a smaller "
+            "model or GPU. Otherwise check that Ollama is running and the models are installed."
         ) from error
 
     existing_draft = session.scalar(
@@ -477,10 +478,10 @@ def submit_render(
     """Queue a render job for the render-approved storyboard and dispatch it to RunPod."""
     require_permission(principal, Permission.RENDER_SUBMIT)
     settings: Settings = request.app.state.settings
-    if not settings.runpod_serverless_endpoint_id:
+    if not settings.runpod_dispatch_target:
         raise ServiceUnavailableError(
-            "RunPod is not configured. Set UVM_RUNPOD_SERVERLESS_ENDPOINT_ID in .env and "
-            "restart the API."
+            "RunPod is not configured. Set UVM_RUNPOD_SERVERLESS_ENDPOINT_ID (Serverless) or "
+            "UVM_RUNPOD_POD_URL and UVM_RUNPOD_POD_API_KEY (Pod) in .env and restart the API."
         )
     try:
         client = request.app.state.render_client_factory(settings)

@@ -1,8 +1,12 @@
 runpod>=1.7
-diffusers>=0.30
-transformers>=4.44
-accelerate>=0.33
+diffusers>=0.33
+transformers>=4.48
+accelerate>=0.34
 safetensors
 boto3>=1.34
 pillow
 piper-tts>=1.2
+kokoro>=0.8.4
+soundfile>=0.12.1
+torchao>=0.7.0
+

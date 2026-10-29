@@ -80,7 +80,7 @@ class Settings(BaseSettings):
         validation_alias=_environment_alias("OLLAMA_EMBEDDING_MODEL"),
     )
     ollama_request_timeout_seconds: int = Field(
-        default=180,
+        default=600,
         ge=1,
         le=600,
         validation_alias=_environment_alias("OLLAMA_REQUEST_TIMEOUT_SECONDS"),
@@ -126,6 +126,12 @@ class Settings(BaseSettings):
     )
     runpod_serverless_endpoint_id: str | None = Field(
         default=None, validation_alias=_environment_alias("RUNPOD_SERVERLESS_ENDPOINT_ID")
+    )
+    runpod_pod_url: str | None = Field(
+        default=None, validation_alias=_environment_alias("RUNPOD_POD_URL")
+    )
+    runpod_pod_api_key: SecretStr | None = Field(
+        default=None, validation_alias=_environment_alias("RUNPOD_POD_API_KEY")
     )
     runpod_api_base_url: str = Field(
         default="https://api.runpod.io/v2",
@@ -186,6 +192,16 @@ class Settings(BaseSettings):
             raise ValueError("Ollama base URL must be HTTPS, or HTTP on a loopback address.")
         return value.rstrip("/")
 
+    @field_validator("runpod_pod_url")
+    @classmethod
+    def validate_runpod_pod_url(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        parsed = urlsplit(value)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("UVM_RUNPOD_POD_URL must be an HTTPS URL.")
+        return value.strip().rstrip("/")
+
     @field_validator("oidc_issuer_url", "oidc_jwks_url", "minio_endpoint_url")
     @classmethod
     def validate_service_url(cls, value: str) -> str:
@@ -210,6 +226,13 @@ class Settings(BaseSettings):
     @property
     def is_development(self) -> bool:
         return self.environment == "development"
+
+    @property
+    def runpod_dispatch_target(self) -> str | None:
+        """Pod mode (a configured pod URL) wins over a Serverless endpoint ID."""
+        if self.runpod_pod_url:
+            return "pod"
+        return self.runpod_serverless_endpoint_id
 
 
 @lru_cache

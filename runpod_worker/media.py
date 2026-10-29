@@ -123,24 +123,32 @@ def write_video(frames: Iterable[bytes], width: int, height: int, fps: int, outp
 
 
 def loop_clip(clip: Path, duration: float, width: int, height: int, output: Path) -> None:
-    """Stretch a short generated clip to an exact length by slowing it and playing it back and
-    forth, which hides the loop point better than a hard cut."""
+    """Extend a generated clip to an exact length with forward motion, eliminating reverse ping-pong."""
     length = probe_seconds(clip)
-    slow = min(max(duration / (2 * length), 1.0), MAX_SLOWDOWN)
-    cycle = output.with_suffix(".cycle.mp4")
+    if length <= 0:
+        raise RuntimeError(f"Clip {clip.name} has invalid duration.")
+
+    if length >= duration:
+        run(
+            [
+                "ffmpeg", "-y", "-i", str(clip), "-t", f"{duration:.3f}",
+                "-vf",
+                f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+                f"crop={width}:{height},format=yuv420p",
+                "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-r", str(FPS),
+                str(output),
+            ]
+        )
+        return
+
+    slow = min(max(duration / length, 1.0), MAX_SLOWDOWN)
     run(
         [
-            "ffmpeg", "-y", "-i", str(clip), "-filter_complex",
+            "ffmpeg", "-y", "-stream_loop", "-1", "-i", str(clip), "-filter_complex",
             f"[0:v]setpts={slow:.4f}*PTS,fps={FPS},"
             f"scale={width}:{height}:force_original_aspect_ratio=increase,"
-            f"crop={width}:{height},format=yuv420p,split[a][b];"
-            "[b]reverse[r];[a][r]concat=n=2:v=1:a=0[v]",
-            "-map", "[v]", "-c:v", "libx264", "-preset", "veryfast", "-r", str(FPS), str(cycle),
-        ]
-    )  # fmt: skip
-    run(
-        [
-            "ffmpeg", "-y", "-stream_loop", "-1", "-i", str(cycle), "-t", f"{duration:.3f}",
+            f"crop={width}:{height},format=yuv420p[v]",
+            "-map", "[v]", "-t", f"{duration:.3f}",
             "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-r", str(FPS),
             str(output),
         ]
@@ -161,8 +169,34 @@ def attach_audio(video: Path, audio: Path, duration: float, output: Path) -> flo
 
 
 def ambient_music(duration: float, output: Path) -> None:
-    """Synthesize a soft, royalty-free ambient pad (an A minor chord with slow movement)."""
-    notes = (110.0, 164.81, 220.0, 261.63, 329.63)
+    """Provide background music. If a real music track is provided via BACKGROUND_MUSIC_PATH or
+    in BACKGROUND_MUSIC_DIR, it loops and fades it. Otherwise, it synthesizes a warm harmonic ambient pad."""
+    import os
+
+    music_path = os.environ.get("BACKGROUND_MUSIC_PATH")
+    music_dir = os.environ.get("BACKGROUND_MUSIC_DIR", "/app/music_tracks")
+    source_file = None
+    if music_path and Path(music_path).is_file():
+        source_file = Path(music_path)
+    elif Path(music_dir).is_dir():
+        tracks = sorted(Path(music_dir).glob("*.mp3")) + sorted(Path(music_dir).glob("*.wav"))
+        if tracks:
+            source_file = tracks[0]
+
+    if source_file:
+        fade_out = max(duration - 3.0, 0.0)
+        run(
+            [
+                "ffmpeg", "-y", "-stream_loop", "-1", "-i", str(source_file),
+                "-t", f"{duration:.3f}",
+                "-af", f"afade=t=in:d=2,afade=t=out:st={fade_out:.2f}:d=3",
+                "-ar", "44100", "-ac", "2", str(output),
+            ]
+        )
+        return
+
+    # Warm harmonic ambient pad
+    notes = (55.0, 110.0, 164.81, 220.0, 261.63, 329.63)
     command = ["ffmpeg", "-y"]
     for note in notes:
         command += [
@@ -171,7 +205,7 @@ def ambient_music(duration: float, output: Path) -> None:
     inputs = "".join(f"[{i}:a]" for i in range(len(notes)))
     command += [
         "-filter_complex",
-        f"{inputs}amix=inputs={len(notes)}:normalize=0,tremolo=f=0.15:d=0.4,lowpass=f=900,"
+        f"{inputs}amix=inputs={len(notes)}:normalize=0,lowpass=f=750,tremolo=f=0.15:d=0.35,"
         "aecho=0.8:0.7:500|900:0.35|0.25,aformat=channel_layouts=stereo[m]",
         "-map", "[m]", str(output),
     ]  # fmt: skip

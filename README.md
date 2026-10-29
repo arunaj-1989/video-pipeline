@@ -385,7 +385,7 @@ configuration should use `UVM_`. The initial settings are:
 | `UVM_OLLAMA_BASE_URL` | `http://localhost:11434` | Local Ollama URL; remote URLs must use HTTPS |
 | `UVM_OLLAMA_CHAT_MODEL` | `qwen2.5:7b` | Structured research and plan-generation model |
 | `UVM_OLLAMA_EMBEDDING_MODEL` | `nomic-embed-text` | Embedding model used by grounded RAG |
-| `UVM_OLLAMA_REQUEST_TIMEOUT_SECONDS` | `180` | Ollama request timeout |
+| `UVM_OLLAMA_REQUEST_TIMEOUT_SECONDS` | `600` | Ollama request timeout |
 | `UVM_OIDC_ISSUER_URL` | `http://localhost:8080/realms/universal-video-maker` | Keycloak realm issuer |
 | `UVM_OIDC_JWKS_URL` | `http://localhost:8080/realms/universal-video-maker/protocol/openid-connect/certs` | Keycloak signing-key endpoint |
 | `UVM_OIDC_AUDIENCE` | `universal-video-maker-api` | Required JWT audience |

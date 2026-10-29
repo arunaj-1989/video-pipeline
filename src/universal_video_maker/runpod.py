@@ -188,6 +188,8 @@ class RunPodServerlessClient:
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Accept": "application/json",
+            # Cloudflare in front of RunPod proxies blocks urllib's default UA (error 1010).
+            "User-Agent": "universal-video-maker/1.0",
         }
         if payload is not None:
             try:
@@ -250,6 +252,41 @@ class RunPodServerlessClient:
         )
 
 
+class RunPodPodClient(RunPodServerlessClient):
+    """Same job contract as Serverless, served by pod_server.py on a RunPod Pod."""
+
+    @classmethod
+    def from_settings(
+        cls,
+        settings: Settings,
+        *,
+        transport: HttpTransport | None = None,
+    ) -> RunPodPodClient:
+        if not settings.runpod_pod_url:
+            raise ValueError("UVM_RUNPOD_POD_URL must be configured to use a Pod.")
+        if (
+            settings.runpod_pod_api_key is None
+            or not settings.runpod_pod_api_key.get_secret_value().strip()
+        ):
+            raise ValueError("UVM_RUNPOD_POD_API_KEY must be configured to use a Pod.")
+        return cls(
+            api_key=settings.runpod_pod_api_key.get_secret_value(),
+            api_base_url=settings.runpod_pod_url,
+            timeout_seconds=settings.runpod_request_timeout_seconds,
+            transport=transport,
+        )
+
+    @classmethod
+    def _endpoint_path(cls, endpoint_id: str, suffix: str) -> str:
+        return f"/{suffix}"
+
+
+def build_render_client(settings: Settings) -> RunPodServerlessClient:
+    if settings.runpod_pod_url:
+        return RunPodPodClient.from_settings(settings)
+    return RunPodServerlessClient.from_settings(settings)
+
+
 class RunPodJobService:
     """Persist approved render requests and manage serverless job attempts."""
 
@@ -273,9 +310,7 @@ class RunPodJobService:
         actor = self._session.get(User, actor_id)
         if actor is None:
             raise NotFoundError(f"Submitter {actor_id} does not exist.")
-        if actor.status != "active" or actor.role not in {
-            role.value for role in principal.roles
-        }:
+        if actor.status != "active" or actor.role not in {role.value for role in principal.roles}:
             raise ForbiddenError("Submitter account is inactive or roles do not match.")
         if not estimated_cost_usd.is_finite() or estimated_cost_usd <= 0:
             raise ValueError("Estimated cost must be a positive finite USD amount.")
@@ -366,7 +401,7 @@ class RunPodJobService:
         job = self._get_job(job_id)
         if job.status != "queued" or job.remote_job_id is not None:
             raise ConflictError("Only undispatched queued jobs can be dispatched.")
-        chosen_endpoint = endpoint_id or self._settings.runpod_serverless_endpoint_id
+        chosen_endpoint = endpoint_id or self._settings.runpod_dispatch_target
         if not chosen_endpoint:
             raise ValueError(
                 "UVM_RUNPOD_SERVERLESS_ENDPOINT_ID must be configured before dispatch."
@@ -404,7 +439,7 @@ class RunPodJobService:
         job = self._get_job(job_id)
         if job.status not in {"submitted", "running", "cancelling"} or not job.remote_job_id:
             raise ConflictError("Only active remote jobs can be refreshed.")
-        chosen_endpoint = endpoint_id or self._settings.runpod_serverless_endpoint_id
+        chosen_endpoint = endpoint_id or self._settings.runpod_dispatch_target
         if not chosen_endpoint:
             raise ValueError(
                 "UVM_RUNPOD_SERVERLESS_ENDPOINT_ID must be configured before status checks."
@@ -435,7 +470,7 @@ class RunPodJobService:
         job = self._get_job(job_id)
         if job.status not in {"submitted", "running"} or not job.remote_job_id:
             raise ConflictError("Only active remote jobs can be cancelled.")
-        chosen_endpoint = endpoint_id or self._settings.runpod_serverless_endpoint_id
+        chosen_endpoint = endpoint_id or self._settings.runpod_dispatch_target
         if not chosen_endpoint:
             raise ValueError("RunPod endpoint ID must be configured before cancellation.")
         try:
@@ -565,9 +600,7 @@ class RunPodJobService:
             if runtimes:
                 total_runtime_ms = sum(runtimes)
                 job.runtime_seconds = (total_runtime_ms + 999) // 1000
-        job.failure_reason = (
-            remote.error[:1000] if state == "failed" and remote.error else None
-        )
+        job.failure_reason = remote.error[:1000] if state == "failed" and remote.error else None
         if state in {"completed", "failed", "cancelled"}:
             job.completed_at = datetime.now(UTC)
 
@@ -575,9 +608,9 @@ class RunPodJobService:
         now = datetime.now(UTC)
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         query = select(RenderJob).where(
-                RenderJob.provider == "runpod_serverless",
-                RenderJob.created_at >= month_start.replace(tzinfo=None),
-            )
+            RenderJob.provider == "runpod_serverless",
+            RenderJob.created_at >= month_start.replace(tzinfo=None),
+        )
         if excluding_job_id is not None:
             query = query.where(RenderJob.id != excluding_job_id)
         jobs = self._session.scalars(query)
@@ -603,9 +636,7 @@ class RunPodJobService:
         actor = self._session.get(User, actor_id)
         if actor is None:
             raise NotFoundError(f"Actor {actor_id} does not exist.")
-        if actor.status != "active" or actor.role not in {
-            role.value for role in principal.roles
-        }:
+        if actor.status != "active" or actor.role not in {role.value for role in principal.roles}:
             raise ForbiddenError("Actor account is inactive or roles do not match.")
 
     def _get_job(self, job_id: UUID) -> RenderJob:

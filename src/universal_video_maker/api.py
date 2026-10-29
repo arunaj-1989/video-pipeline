@@ -37,7 +37,7 @@ from universal_video_maker.research_api import (
     build_research_workflow_factory,
 )
 from universal_video_maker.research_api import router as research_router
-from universal_video_maker.runpod import RunPodServerlessClient
+from universal_video_maker.runpod import build_render_client
 from universal_video_maker.topics_api import router as topics_router
 
 
@@ -84,7 +84,7 @@ def create_app(
     app.state.token_verifier = token_verifier or KeycloakTokenVerifier.from_settings(settings)
     app.state.session_factory = session_factory
     app.state.settings = settings
-    app.state.render_client_factory = render_client_factory or RunPodServerlessClient.from_settings
+    app.state.render_client_factory = render_client_factory or build_render_client
     app.state.object_store_factory = object_store_factory or default_object_store
     app.state.artifact_inspector_factory = (
         artifact_inspector_factory or default_artifact_inspector

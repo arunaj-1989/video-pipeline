@@ -27,6 +27,9 @@ RUN python -c "from huggingface_hub import snapshot_download; snapshot_download(
 # model layers above stay cached when this changes.
 RUN pip install sentencepiece protobuf
 
+# Only used when the image runs as a Pod (python /app/pod_server.py); Serverless ignores it.
+RUN pip install "fastapi>=0.115,<1.0" "uvicorn>=0.32,<1.0"
+
 WORKDIR /app
-COPY media.py handler.py /app/
+COPY media.py handler.py pod_server.py /app/
 CMD ["python", "-u", "/app/handler.py"]
